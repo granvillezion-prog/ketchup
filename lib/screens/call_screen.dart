@@ -1,539 +1,597 @@
-// lib/screens/call_screen.dart
 import 'dart:async';
-import 'dart:io' show Platform;
-import 'dart:math' show max;
+import 'dart:ui';
 
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
-
-import '../app_state.dart';
-import '../storage.dart';
-import '../theme/know_no_know_theme.dart';
 
 class CallScreen extends StatefulWidget {
-  final String hiddenName;
-  final String phone;
+final String hiddenName;
+final String phone;
+final VoidCallback onConnect;
+final VoidCallback onComplete;
 
-  final VoidCallback onConnect;  // reveal happens when YOU join
-  final VoidCallback onComplete; // parent navigates to reveal / refreshes Today
+const CallScreen({
+super.key,
+required this.hiddenName,
+required this.phone,
+required this.onConnect,
+required this.onComplete,
+});
 
-  const CallScreen({
-    super.key,
-    required this.hiddenName,
-    required this.phone,
-    required this.onConnect,
-    required this.onComplete,
-  });
-
-  @override
-  State<CallScreen> createState() => _CallScreenState();
+@override
+State<CallScreen> createState() => _CallScreenState();
 }
 
-class _CallScreenState extends State<CallScreen> {
-  static const int baseSeconds = AppState.baseCallSeconds; // 300
-  static const int minSecondsBeforeEnd = 10;
+class _CallScreenState extends State<CallScreen>
+with WidgetsBindingObserver {
+static const int _baseSeconds = 300;
+static const int _extendSeconds = 300;
 
-  int remaining = baseSeconds;
+static const Color _brandPurple = Color(0xFFB75AFF);
+static const Color _brandPurpleDim = Color(0xFF7A4BAE);
+static const Color _faceTimeDark = Color(0xFF2C2C2E);
+static const Color _endRed = Color(0xFFFF5A52);
 
-  Timer? _timer;
+static const double _previewWidth = 112;
+static const double _previewHeight = 150;
 
-  bool joined = false;
-  bool extended = false;
-  bool _firedConnect = false;
+CameraController? _cameraController;
+bool _cameraReady = false;
+bool _cameraInitializing = false;
+CameraLensDirection _currentLens = CameraLensDirection.front;
 
-  // countdown state
-  bool _countingDown = false;
-  int _count = 3;
-  Timer? _countTimer;
+Timer? _timer;
+Timer? _devConnectTimer;
 
-  String? _callError;
+int _remaining = _baseSeconds;
+bool _extended = false;
+bool _connected = false;
+bool _speakerOn = true;
+bool _muted = false;
+bool _showCameraPreviewSmall = true;
+bool _ending = false;
 
-  @override
-  void initState() {
-    super.initState();
-    _resumeIfNeeded();
-  }
+Offset? _previewOffset;
 
-  @override
-  void dispose() {
-    _timer?.cancel();
-    _countTimer?.cancel();
-    super.dispose();
-  }
+@override
+void initState() {
+super.initState();
+WidgetsBinding.instance.addObserver(this);
+_initCamera();
+_startCallImmediately();
+}
 
-  // ----------------------------
-  // REAL CALL LAUNCH
-  // ----------------------------
+@override
+void dispose() {
+WidgetsBinding.instance.removeObserver(this);
+_timer?.cancel();
+_devConnectTimer?.cancel();
+_cameraController?.dispose();
+super.dispose();
+}
 
-  String _sanitizePhone(String raw) {
-    return raw.trim().replaceAll(RegExp(r'[^0-9+]'), '');
-  }
+@override
+void didChangeAppLifecycleState(AppLifecycleState state) {
+final cam = _cameraController;
+if (cam == null) return;
 
-  Future<void> _launchNativeCall() async {
-    setState(() => _callError = null);
+if (state == AppLifecycleState.inactive ||
+state == AppLifecycleState.paused ||
+state == AppLifecycleState.detached) {
+cam.dispose();
+_cameraController = null;
+if (mounted) {
+setState(() => _cameraReady = false);
+}
+} else if (state == AppLifecycleState.resumed) {
+_initCamera(lensDirection: _currentLens);
+}
+}
 
-    final phone = _sanitizePhone(widget.phone);
-    if (phone.isEmpty) {
-      setState(() => _callError = "No phone number found for this person.");
-      return;
-    }
+Future<void> _initCamera({
+CameraLensDirection? lensDirection,
+}) async {
+if (_cameraInitializing) return;
+_cameraInitializing = true;
 
-    // iOS prefers FaceTime, fallback to tel:
-    if (Platform.isIOS) {
-      final ft = Uri.parse('facetime:$phone');
-      if (await canLaunchUrl(ft)) {
-        final ok = await launchUrl(ft, mode: LaunchMode.externalApplication);
-        if (!ok) setState(() => _callError = "Couldn’t open FaceTime.");
-        return;
-      }
+try {
+final cameras = await availableCameras();
+if (!mounted) return;
 
-      final tel = Uri(scheme: 'tel', path: phone);
-      if (await canLaunchUrl(tel)) {
-        final ok = await launchUrl(tel, mode: LaunchMode.externalApplication);
-        if (!ok) setState(() => _callError = "Couldn’t open the Phone app.");
-        return;
-      }
+final targetLens = lensDirection ?? _currentLens;
+CameraDescription? chosen;
 
-      setState(() => _callError = "FaceTime/Phone not available on this device.");
-      return;
-    }
+for (final cam in cameras) {
+if (cam.lensDirection == targetLens) {
+chosen = cam;
+break;
+}
+}
 
-    // Android: tel:
-    final uri = Uri(scheme: 'tel', path: phone);
-    if (!await canLaunchUrl(uri)) {
-      setState(() => _callError = "Couldn’t open the dialer on this device.");
-      return;
-    }
+chosen ??= cameras.isNotEmpty ? cameras.first : null;
+if (chosen == null) {
+if (mounted) {
+setState(() => _cameraReady = false);
+}
+return;
+}
 
-    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
-    if (!ok) setState(() => _callError = "Couldn’t open the dialer.");
-  }
+final controller = CameraController(
+chosen,
+ResolutionPreset.high,
+enableAudio: false,
+);
 
-  // ----------------------------
-  // TIMER / RESUME
-  // ----------------------------
+await controller.initialize();
 
-  Future<void> _resumeIfNeeded() async {
-    final r = AppState.getRemainingCallSeconds();
-    if (r == null) return;
+if (!mounted) {
+await controller.dispose();
+return;
+}
 
-    final total = AppStorage.getCallTotalSeconds() ?? baseSeconds;
+await _cameraController?.dispose();
 
-    // If timer already expired, finish immediately and return.
-    if (r <= 0) {
-      await _finishCall();
-      return;
-    }
+setState(() {
+_cameraController = controller;
+_cameraReady = true;
+_currentLens = chosen!.lensDirection;
+});
+} catch (_) {
+if (!mounted) return;
+setState(() => _cameraReady = false);
+} finally {
+_cameraInitializing = false;
+}
+}
 
-    if (!mounted) return;
-    setState(() {
-      remaining = r;
-      joined = true;
-      extended = total > baseSeconds;
-      _firedConnect = true; // already joined previously
-    });
+void _startCallImmediately() {
+widget.onConnect();
 
-    _startTimerOnly();
-  }
+setState(() {
+_remaining = _baseSeconds;
+_extended = false;
+_connected = false;
+});
 
-  void _startTimerOnly() {
-    _timer?.cancel();
-    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
+_timer?.cancel();
+_timer = Timer.periodic(const Duration(seconds: 1), (_) {
+if (!mounted) return;
 
-      final r = AppState.getRemainingCallSeconds();
-      final total = AppStorage.getCallTotalSeconds() ?? baseSeconds;
+if (_remaining <= 1) {
+_endCall();
+return;
+}
 
-      if (r == null) {
-        // Shouldn’t happen often, but keep UI moving.
-        setState(() => remaining = max(0, remaining - 1));
-        if (remaining == 0) {
-          scheduleMicrotask(_finishCall);
-        }
-        return;
-      }
+setState(() {
+_remaining -= 1;
+});
+});
 
-      setState(() {
-        remaining = r;
-        extended = total > baseSeconds;
-      });
+_devConnectTimer?.cancel();
+_devConnectTimer = Timer(const Duration(milliseconds: 1200), () {
+if (!mounted) return;
+setState(() {
+_connected = true;
+});
+});
+}
 
-      if (r == 0) {
-        scheduleMicrotask(_finishCall);
-      }
-    });
-  }
+Future<void> _flipCamera() async {
+final nextLens = _currentLens == CameraLensDirection.front
+? CameraLensDirection.back
+: CameraLensDirection.front;
+await _initCamera(lensDirection: nextLens);
+}
 
-  void _beginJoinFlow() {
-    if (joined || _countingDown) return;
+void _toggleSpeaker() {
+setState(() => _speakerOn = !_speakerOn);
+}
 
-    setState(() {
-      _countingDown = true;
-      _count = 3;
-      _callError = null;
-    });
+void _toggleMute() {
+setState(() => _muted = !_muted);
+}
 
-    _countTimer?.cancel();
-    _countTimer = Timer.periodic(const Duration(seconds: 1), (t) {
-      if (!mounted) {
-        t.cancel();
-        return;
-      }
+void _togglePreviewSize() {
+setState(() => _showCameraPreviewSmall = !_showCameraPreviewSmall);
+}
 
-      setState(() => _count -= 1);
+void _extendCall() {
+if (_extended) return;
 
-      if (_count <= 0) {
-        t.cancel();
-        if (!mounted) return;
+setState(() {
+_remaining += _extendSeconds;
+_extended = true;
+});
+}
 
-        setState(() {
-          _countingDown = false;
-          joined = true;
-        });
+void _endCall() {
+if (_ending) return;
+_ending = true;
 
-        _startCall();
-      }
-    });
-  }
+_timer?.cancel();
+_devConnectTimer?.cancel();
 
-  Future<void> _startCall() async {
-    // Persist timer start (only once)
-    await AppState.setCallStartedNowIfEmpty();
+widget.onComplete();
 
-    // Fire connect callback once (this is the “reveal when you join” moment)
-    if (!_firedConnect) {
-      _firedConnect = true;
-      widget.onConnect();
-    }
+if (mounted) {
+Navigator.of(context).pop();
+}
+}
 
-    // Launch native call UI
-    await _launchNativeCall();
+String _formatTime(int seconds) {
+final m = (seconds ~/ 60).toString().padLeft(2, '0');
+final s = (seconds % 60).toString().padLeft(2, '0');
+return '$m:$s';
+}
 
-    final r = AppState.getRemainingCallSeconds() ?? baseSeconds;
-    final total = AppStorage.getCallTotalSeconds() ?? baseSeconds;
+Widget _buildFullCamera() {
+final controller = _cameraController;
 
-    if (!mounted) return;
-    setState(() {
-      remaining = r;
-      extended = total > baseSeconds;
-    });
+if (!_cameraReady || controller == null || !controller.value.isInitialized) {
+return Container(
+color: Colors.black,
+alignment: Alignment.center,
+child: const Icon(
+Icons.videocam_off_rounded,
+color: Colors.white38,
+size: 52,
+),
+);
+}
 
-    _startTimerOnly();
-  }
+final size = controller.value.previewSize;
+if (size == null) {
+return Container(color: Colors.black);
+}
 
-  Future<void> _extendCall() async {
-    if (!joined || extended) return;
+return ClipRect(
+child: OverflowBox(
+alignment: Alignment.center,
+maxWidth: double.infinity,
+maxHeight: double.infinity,
+child: FittedBox(
+fit: BoxFit.cover,
+child: SizedBox(
+width: size.height,
+height: size.width,
+child: CameraPreview(controller),
+),
+),
+),
+);
+}
 
-    await AppState.markExtendedOnce();
+Widget _buildSmallPreview() {
+return GestureDetector(
+onTap: _togglePreviewSize,
+child: Container(
+width: _previewWidth,
+height: _previewHeight,
+decoration: BoxDecoration(
+color: Colors.black,
+borderRadius: BorderRadius.circular(18),
+border: Border.all(
+color: Colors.white.withOpacity(0.18),
+width: 1,
+),
+boxShadow: [
+BoxShadow(
+color: Colors.black.withOpacity(0.35),
+blurRadius: 16,
+offset: const Offset(0, 8),
+),
+],
+),
+clipBehavior: Clip.antiAlias,
+child: Stack(
+fit: StackFit.expand,
+children: [
+_buildFullCamera(),
+Positioned(
+right: 8,
+bottom: 8,
+child: Container(
+width: 28,
+height: 28,
+decoration: BoxDecoration(
+color: Colors.black.withOpacity(0.6),
+shape: BoxShape.circle,
+),
+child: const Icon(
+Icons.cameraswitch_rounded,
+color: Colors.white,
+size: 18,
+),
+),
+),
+],
+),
+),
+);
+}
 
-    final r = AppState.getRemainingCallSeconds();
-    final total = AppStorage.getCallTotalSeconds() ?? baseSeconds;
+Widget _buildRemoteBackground() {
+return Stack(
+fit: StackFit.expand,
+children: [
+Container(color: Colors.black),
+Positioned.fill(
+child: DecoratedBox(
+decoration: const BoxDecoration(
+gradient: LinearGradient(
+begin: Alignment.topCenter,
+end: Alignment.bottomCenter,
+colors: [
+Color(0xFF16121F),
+Color(0xFF120714),
+Colors.black,
+],
+),
+),
+),
+),
+],
+);
+}
 
-    if (!mounted) return;
-    setState(() {
-      extended = total > baseSeconds;
-      if (r != null) remaining = r;
-    });
-  }
+Widget _buildTimer() {
+return Positioned.fill(
+child: IgnorePointer(
+child: Center(
+child: Text(
+_formatTime(_remaining),
+style: const TextStyle(
+color: _brandPurple,
+fontSize: 34,
+fontWeight: FontWeight.w900,
+letterSpacing: 0.8,
+height: 1,
+shadows: [
+Shadow(
+color: Color(0x99B75AFF),
+blurRadius: 18,
+),
+Shadow(
+color: Color(0x66000000),
+blurRadius: 8,
+),
+],
+),
+),
+),
+),
+);
+}
 
-  Future<void> _finishCall() async {
-    _timer?.cancel();
-    _countTimer?.cancel();
+Widget _controlButton({
+required Widget icon,
+required String label,
+required VoidCallback onTap,
+Color fill = Colors.white,
+}) {
+return GestureDetector(
+onTap: onTap,
+child: SizedBox(
+width: 66,
+child: Column(
+mainAxisSize: MainAxisSize.min,
+children: [
+Container(
+width: 58,
+height: 58,
+decoration: BoxDecoration(
+color: fill,
+shape: BoxShape.circle,
+),
+child: Center(child: icon),
+),
+const SizedBox(height: 7),
+Text(
+label,
+textAlign: TextAlign.center,
+style: const TextStyle(
+color: Colors.white,
+fontSize: 12,
+fontWeight: FontWeight.w500,
+shadows: [
+Shadow(
+color: Colors.black87,
+blurRadius: 6,
+),
+],
+),
+),
+],
+),
+),
+);
+}
 
-    // ✅ IMPORTANT:
-    // AppState.markCallComplete() already:
-    // - marks day complete + points/streak
-    // - clears call timer
-    // - advances (Plus) exactly once
-    await AppState.markCallComplete();
+Widget _buildTopControls() {
+return Positioned(
+top: 112,
+left: 0,
+right: 0,
+child: SafeArea(
+bottom: false,
+child: Padding(
+padding: const EdgeInsets.fromLTRB(10, 0, 10, 0),
+child: Row(
+mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+crossAxisAlignment: CrossAxisAlignment.start,
+children: [
+_controlButton(
+icon: Icon(
+_speakerOn
+? Icons.volume_up_rounded
+: Icons.volume_off_rounded,
+color: Colors.black,
+size: 29,
+),
+label: 'Speaker',
+onTap: _toggleSpeaker,
+),
+_controlButton(
+icon: const Icon(
+Icons.videocam_rounded,
+color: Colors.black,
+size: 29,
+),
+label: 'Camera',
+onTap: _flipCamera,
+),
+_controlButton(
+icon: const Text(
+'5',
+style: TextStyle(
+color: Colors.white,
+fontSize: 28,
+fontWeight: FontWeight.w900,
+height: 1,
+),
+),
+label: _extended ? 'Extended' : '+ 5',
+onTap: _extendCall,
+fill: _extended ? _brandPurpleDim : _brandPurple,
+),
+_controlButton(
+icon: Icon(
+_muted ? Icons.mic_off_rounded : Icons.mic_none_rounded,
+color: _muted ? Colors.redAccent : Colors.white,
+size: 28,
+),
+label: 'Mute',
+onTap: _toggleMute,
+fill: _faceTimeDark,
+),
+_controlButton(
+icon: const Icon(
+Icons.close_rounded,
+color: Colors.white,
+size: 30,
+),
+label: 'End',
+onTap: _endCall,
+fill: _endRed,
+),
+],
+),
+),
+),
+);
+}
 
-    if (!mounted) return;
-    widget.onComplete();
-  }
+Offset _defaultPreviewOffset(Size size, EdgeInsets padding) {
+return Offset(
+size.width - _previewWidth - 20,
+padding.top + 22,
+);
+}
 
-  String _format(int s) {
-    final m = (s ~/ 60).toString().padLeft(2, '0');
-    final r = (s % 60).toString().padLeft(2, '0');
-    return '$m:$r';
-  }
+Offset _clampPreviewOffset(
+Offset offset,
+Size size,
+EdgeInsets padding,
+) {
+final minX = 12.0;
+final maxX = size.width - _previewWidth - 12.0;
+final minY = padding.top + 10.0;
+final maxY = size.height - _previewHeight - padding.bottom - 12.0;
 
-  @override
-  Widget build(BuildContext context) {
-    final startedAt = AppStorage.getCallStartedAt();
-    final elapsed = (startedAt == null)
-        ? 0
-        : ((DateTime.now().millisecondsSinceEpoch - startedAt) / 1000).floor();
+return Offset(
+offset.dx.clamp(minX, maxX),
+offset.dy.clamp(minY, maxY),
+);
+}
 
-    final canEnd = joined && elapsed >= minSecondsBeforeEnd;
+Widget _buildDraggablePreview(BoxConstraints constraints) {
+final padding = MediaQuery.of(context).padding;
+final size = Size(constraints.maxWidth, constraints.maxHeight);
 
-    final statusLine = joined
-        ? (extended ? "Extended • timer is live" : "Timer is live")
-        : "Press JOIN to reveal + start 5:00";
+_previewOffset ??= _defaultPreviewOffset(size, padding);
+_previewOffset = _clampPreviewOffset(_previewOffset!, size, padding);
 
-    final countdownOverlay = _countingDown
-        ? Positioned.fill(
-            child: Container(
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    KnowNoKnowTheme.primary,
-                    Color(0xFF6A35D8),
-                    Color(0xFF0B0B0C),
-                  ],
-                ),
-              ),
-              alignment: Alignment.center,
-              child: Text(
-                _count > 0 ? _count.toString() : "GO",
-                style: const TextStyle(
-                  color: KnowNoKnowTheme.white,
-                  fontSize: 120,
-                  fontWeight: FontWeight.w900,
-                  height: 1,
-                ),
-              ),
-            ),
-          )
-        : const SizedBox.shrink();
+return Positioned(
+left: _previewOffset!.dx,
+top: _previewOffset!.dy,
+child: GestureDetector(
+onPanUpdate: (details) {
+setState(() {
+_previewOffset = _clampPreviewOffset(
+_previewOffset! + details.delta,
+size,
+padding,
+);
+});
+},
+child: _buildSmallPreview(),
+),
+);
+}
 
-    return Scaffold(
-      backgroundColor: Colors.transparent,
-      appBar: AppBar(
-        title: const Text(
-          'Know No Know',
-          style: TextStyle(fontWeight: FontWeight.w900),
-        ),
-      ),
-      body: Container(
-        decoration: const BoxDecoration(gradient: KnowNoKnowTheme.bgGradient),
-        child: SafeArea(
-          child: Stack(
-            children: [
-              Padding(
-                padding: const EdgeInsets.all(18),
-                child: Column(
-                  children: [
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(18),
-                      decoration: BoxDecoration(
-                        gradient: KnowNoKnowTheme.cardGradient,
-                        borderRadius: BorderRadius.circular(22),
-                        border: Border.all(
-                          color: KnowNoKnowTheme.stroke,
-                          width: 1.2,
-                        ),
-                        boxShadow: [
-                          BoxShadow(
-                            color: Colors.black.withOpacity(0.10),
-                            blurRadius: 26,
-                            spreadRadius: 2,
-                          ),
-                        ],
-                      ),
-                      child: Column(
-                        children: [
-                          Text(
-                            joined ? "YOU'RE CALLING" : "MYSTERY CALL",
-                            style: const TextStyle(
-                              color: KnowNoKnowTheme.ink,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 0.8,
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-                          if (joined) ...[
-                            Text(
-                              widget.hiddenName,
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(
-                                color: KnowNoKnowTheme.ink,
-                                fontSize: 28,
-                                fontWeight: FontWeight.w900,
-                                letterSpacing: -0.2,
-                              ),
-                            ),
-                            const SizedBox(height: 8),
-                          ],
-                          Text(
-                            _format(remaining),
-                            style: const TextStyle(
-                              color: KnowNoKnowTheme.ink,
-                              fontSize: 46,
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 1.4,
-                            ),
-                          ),
-                          const SizedBox(height: 6),
-                          Text(
-                            statusLine,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              color: KnowNoKnowTheme.mutedInk,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
-                          if (_callError != null) ...[
-                            const SizedBox(height: 10),
-                            Container(
-                              width: double.infinity,
-                              padding: const EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                color: KnowNoKnowTheme.panel,
-                                borderRadius: BorderRadius.circular(16),
-                                border: Border.all(
-                                  color: KnowNoKnowTheme.stroke,
-                                  width: 1.2,
-                                ),
-                              ),
-                              child: Text(
-                                _callError!,
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(
-                                  color: KnowNoKnowTheme.mutedInk,
-                                  fontWeight: FontWeight.w900,
-                                  height: 1.15,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    Expanded(
-                      child: Container(
-                        width: double.infinity,
-                        decoration: BoxDecoration(
-                          gradient: const LinearGradient(
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                            colors: [
-                              Color(0xFF0B0B0C),
-                              Color(0xFF141417),
-                            ],
-                          ),
-                          borderRadius: BorderRadius.circular(22),
-                          border: Border.all(
-                            color: KnowNoKnowTheme.stroke,
-                            width: 1.2,
-                          ),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.10),
-                              blurRadius: 22,
-                              spreadRadius: 1,
-                            ),
-                          ],
-                        ),
-                        child: Center(
-                          child: Text(
-                            joined
-                                ? "CALL OPENED\n(Phone / FaceTime)\nTimer continues here."
-                                : "JOIN starts the call + timer.",
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              color: Colors.white70,
-                              fontWeight: FontWeight.w800,
-                              height: 1.2,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: SizedBox(
-                            height: 56,
-                            child: ElevatedButton(
-                              onPressed: (joined || _countingDown) ? null : _beginJoinFlow,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: (joined || _countingDown)
-                                    ? KnowNoKnowTheme.stroke
-                                    : KnowNoKnowTheme.ink,
-                                foregroundColor: KnowNoKnowTheme.white,
-                              ),
-                              child: Text(
-                                joined ? "JOINED" : (_countingDown ? "..." : "JOIN"),
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w900,
-                                  letterSpacing: 0.6,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Expanded(
-                          child: SizedBox(
-                            height: 56,
-                            child: ElevatedButton(
-                              onPressed: (!joined || extended) ? null : _extendCall,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: KnowNoKnowTheme.primary,
-                                foregroundColor: KnowNoKnowTheme.white,
-                              ),
-                              child: Text(
-                                extended ? "EXTENDED" : "EXTEND +5",
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.w900,
-                                  letterSpacing: 0.6,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    SizedBox(
-                      width: double.infinity,
-                      height: 56,
-                      child: ElevatedButton(
-                        onPressed: canEnd ? _finishCall : null,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: canEnd ? KnowNoKnowTheme.white : KnowNoKnowTheme.stroke,
-                          foregroundColor: canEnd ? KnowNoKnowTheme.ink : KnowNoKnowTheme.mutedInk,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(20),
-                            side: BorderSide(
-                              color: canEnd ? KnowNoKnowTheme.ink : Colors.transparent,
-                              width: 1.2,
-                            ),
-                          ),
-                        ),
-                        child: const Text(
-                          "END CALL",
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w900,
-                            letterSpacing: 0.6,
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      canEnd ? "You can end now." : "Let it run a moment before ending.",
-                      style: const TextStyle(
-                        color: KnowNoKnowTheme.mutedInk,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              countdownOverlay,
-            ],
-          ),
-        ),
-      ),
-    );
-  }
+@override
+Widget build(BuildContext context) {
+final showSmallPreview = _connected && _showCameraPreviewSmall;
+
+return Scaffold(
+backgroundColor: Colors.black,
+body: LayoutBuilder(
+builder: (context, constraints) {
+return Stack(
+fit: StackFit.expand,
+children: [
+if (_connected) _buildRemoteBackground() else _buildFullCamera(),
+Positioned.fill(
+child: DecoratedBox(
+decoration: BoxDecoration(
+gradient: LinearGradient(
+begin: Alignment.topCenter,
+end: Alignment.bottomCenter,
+colors: [
+Colors.black.withOpacity(0.18),
+Colors.transparent,
+Colors.black.withOpacity(0.10),
+],
+),
+),
+),
+),
+_buildTopControls(),
+_buildTimer(),
+if (showSmallPreview) _buildDraggablePreview(constraints),
+if (!_connected)
+Positioned(
+left: 0,
+right: 0,
+bottom: 148,
+child: Center(
+child: ClipRRect(
+borderRadius: BorderRadius.circular(18),
+child: BackdropFilter(
+filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+child: Container(
+padding: const EdgeInsets.symmetric(
+horizontal: 16,
+vertical: 10,
+),
+color: Colors.white.withOpacity(0.12),
+child: const Text(
+'Calling...',
+style: TextStyle(
+color: Colors.white,
+fontSize: 15,
+fontWeight: FontWeight.w700,
+),
+),
+),
+),
+),
+),
+),
+],
+);
+},
+),
+);
+}
 }

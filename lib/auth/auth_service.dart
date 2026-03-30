@@ -1,12 +1,19 @@
 import 'package:firebase_auth/firebase_auth.dart';
 
 class AuthService {
-  static final FirebaseAuth _auth = FirebaseAuth.instance;
+  static FirebaseAuth get _auth => FirebaseAuth.instance;
 
+  /// Ensures request.auth is not null for Firestore rules.
+  /// MVP: anonymous auth (upgrade to phone auth later).
   static Future<void> ensureSignedIn() async {
-    if (_auth.currentUser == null) {
-      await _auth.signInAnonymously();
-    }
+    final user = _auth.currentUser;
+    if (user != null) return;
+
+    await _auth.signInAnonymously();
+
+    // Optional sanity log
+    // ignore: avoid_print
+    print("✅ Signed in anonymously: ${_auth.currentUser?.uid}");
   }
 
   static String get uid {
@@ -17,5 +24,5 @@ class AuthService {
     return u.uid;
   }
 
-  static String? get displayName => _auth.currentUser?.displayName;
+  static User? get currentUser => _auth.currentUser;
 }

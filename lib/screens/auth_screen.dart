@@ -1,221 +1,253 @@
-// lib/screens/auth_screen.dart
+import 'dart:io' show Platform;
+
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:google_sign_in/google_sign_in.dart';
+import 'package:sign_in_with_apple/sign_in_with_apple.dart';
+
 import '../app_router.dart';
+import '../services/user_service.dart';
 import '../storage.dart';
-import '../theme/know_no_know_theme.dart';
-import '../app_state.dart';
 
 class AuthScreen extends StatelessWidget {
   const AuthScreen({super.key});
 
+  static const Color _oauthBtn = Color(0xFFFFFFFF);
+  static const Color _oauthStroke = Color(0x1A000000);
+  static const Color _phoneBtn = Color(0xFF4dff00);
+  static const Color _appleBtn = Color(0xFF000000);
+
+  Future<void> _postAuthContinue(BuildContext context) async {
+    await UserService.ensureUserDoc();
+    await AppStorage.setAuthed(true);
+    if (!context.mounted) return;
+
+    final nextRoute = !AppStorage.isProfileComplete()
+        ? AppRouter.profile
+        : AppRouter.today;
+
+    Navigator.pushNamedAndRemoveUntil(context, nextRoute, (_) => false);
+  }
+
+  Future<void> _signInWithGoogle(BuildContext context) async {
+    try {
+      final googleUser = await GoogleSignIn(scopes: const ['email']).signIn();
+      if (googleUser == null) return;
+
+      final googleAuth = await googleUser.authentication;
+      final credential = GoogleAuthProvider.credential(
+        accessToken: googleAuth.accessToken,
+        idToken: googleAuth.idToken,
+      );
+
+      await FirebaseAuth.instance.signInWithCredential(credential);
+      await _postAuthContinue(context);
+    } catch (_) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Google sign-in failed')),
+      );
+    }
+  }
+
+  Future<void> _signInWithApple(BuildContext context) async {
+    try {
+      if (!Platform.isIOS && !Platform.isMacOS) return;
+
+      final appleCredential = await SignInWithApple.getAppleIDCredential(
+        scopes: const [
+          AppleIDAuthorizationScopes.email,
+          AppleIDAuthorizationScopes.fullName,
+        ],
+      );
+
+      final provider = OAuthProvider('apple.com');
+      final credential = provider.credential(
+        idToken: appleCredential.identityToken,
+        accessToken: appleCredential.authorizationCode,
+      );
+
+      await FirebaseAuth.instance.signInWithCredential(credential);
+      await _postAuthContinue(context);
+    } catch (_) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Apple sign-in failed')),
+      );
+    }
+  }
+
+  void _goPhone(BuildContext context) {
+    Navigator.pushNamed(context, AppRouter.phone);
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.transparent, // ✅ keep consistent with theme gradient
       body: SafeArea(
-        child: Container(
-          decoration: const BoxDecoration(gradient: KnowNoKnowTheme.bgGradient),
-          child: Padding(
-            padding: const EdgeInsets.all(18),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const SizedBox(height: 26),
+        bottom: false,
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: Image.asset(
+                'assets/today_screen4.jpg',
+                fit: BoxFit.cover,
+              ),
+            ),
 
-                // Logo / brand lockup
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                  decoration: BoxDecoration(
-                    gradient: KnowNoKnowTheme.cardGradient,
-                    borderRadius: BorderRadius.circular(18),
-                    border: Border.all(color: KnowNoKnowTheme.stroke, width: 1.2),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.12),
-                        blurRadius: 26,
-                        spreadRadius: 2,
+            Positioned(
+              top: 240,
+              right: (MediaQuery.of(context).size.width - 320) / 2 + 20,
+              child: Image.asset(
+                'assets/logo2.jpg',
+                height: 140,
+                fit: BoxFit.contain,
+              ),
+            ),
+
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 18, 18, 0),
+              child: Column(
+                children: [
+                  const Spacer(flex: 2),
+                  const SizedBox(height: 250),
+
+                  Column(
+                    children: [
+                      _buttonWrapper(
+                        ElevatedButton(
+                          onPressed: () => _goPhone(context),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: _phoneBtn,
+                            foregroundColor: Colors.black,
+                            elevation: 0,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(40),
+                            ),
+                          ),
+                          child: const Text(
+                            'Continue with phone',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w900,
+                              fontSize: 18,
+                            ),
+                          ),
+                        ),
                       ),
-                    ],
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: const [
-                      Icon(Icons.call_rounded, color: KnowNoKnowTheme.primary),
-                      SizedBox(width: 10),
-                      Text(
-                        "Know No Know",
-                        style: TextStyle(
-                          color: KnowNoKnowTheme.ink,
-                          fontSize: 22,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 0.4,
+                      const SizedBox(height: 14),
+                      _buttonWrapper(
+                        OutlinedButton(
+                          onPressed: () => _signInWithGoogle(context),
+                          style: OutlinedButton.styleFrom(
+                            backgroundColor: _oauthBtn,
+                            foregroundColor: Colors.black,
+                            side: const BorderSide(color: _oauthStroke),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(40),
+                            ),
+                          ),
+                          child: const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.g_mobiledata_rounded, size: 34),
+                              SizedBox(width: 6),
+                              Text(
+                                'Continue with Google',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 17,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      _buttonWrapper(
+                        OutlinedButton(
+                          onPressed: () => _signInWithApple(context),
+                          style: OutlinedButton.styleFrom(
+                            backgroundColor: _appleBtn,
+                            foregroundColor: Colors.white,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(40),
+                            ),
+                          ),
+                          child: const Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.apple, size: 36, color: Colors.white),
+                              SizedBox(width: 12),
+                              Text(
+                                'Continue with Apple',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w900,
+                                  fontSize: 17,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ],
                   ),
-                ),
 
-                const SizedBox(height: 16),
+                  const SizedBox(height: 80),
 
-                Text(
-                  "One mystery call a day.",
-                  style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                        color: KnowNoKnowTheme.ink,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: -0.3,
+                  Column(
+                    children: const [
+                      Text(
+                        'You know your friends. You don’t know which one.',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white70,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  "Keep friendships alive — without the 2-hour convo.",
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: KnowNoKnowTheme.mutedInk,
-                        fontWeight: FontWeight.w900,
+                      SizedBox(height: 10),
+                      Text(
+                        'One Mystery Friend a Day',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 22,
+                          fontWeight: FontWeight.w900,
+                        ),
                       ),
-                ),
-
-                const SizedBox(height: 18),
-
-                // Feature bullets
-                const _FeatureCard(
-                  title: "HOW IT WORKS",
-                  bullets: [
-                    "Pick your people.",
-                    "You get 1 random pairing each day.",
-                    "You don’t know who it is until you JOIN.",
-                    "5 minutes — extend +5 once.",
-                  ],
-                ),
-
-                const Spacer(),
-
-                SizedBox(
-                  width: double.infinity,
-                  height: 60,
-                  child: ElevatedButton(
-                    onPressed: () async {
-                      await AppStorage.setAuthed(true);
-                      if (!context.mounted) return;
-                      Navigator.pushReplacementNamed(context, AppRouter.profile);
-                    },
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: KnowNoKnowTheme.ink,
-                      foregroundColor: KnowNoKnowTheme.white,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(20),
+                      SizedBox(height: 6),
+                      Text(
+                        '5-minute timed calls',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.white60,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                        ),
                       ),
-                    ),
-                    child: const Text(
-                      "CONTINUE",
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 0.6,
-                      ),
-                    ),
+                    ],
                   ),
-                ),
 
-                const SizedBox(height: 10),
-
-                Center(
-                  child: TextButton(
-                    onPressed: () async {
-                      // ✅ dev reset should also clear in-progress call timer (Option C)
-                      await AppState.clearCallStarted();
-
-                      await AppStorage.setAuthed(false);
-                      await AppStorage.setProfile(name: '');
-                      await AppStorage.setCircle([]);
-                      await AppStorage.clearTodayPair();
-
-                      if (!context.mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text("Local data reset.")),
-                      );
-                    },
-                    child: const Text(
-                      "Dev: reset local data",
-                      style: TextStyle(
-                        color: KnowNoKnowTheme.mutedInk,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                  ),
-                ),
-
-                const SizedBox(height: 10),
-              ],
+                  const Spacer(flex: 3),
+                ],
+              ),
             ),
-          ),
+          ],
         ),
       ),
     );
   }
-}
 
-class _FeatureCard extends StatelessWidget {
-  const _FeatureCard({required this.title, required this.bullets});
-
-  final String title;
-  final List<String> bullets;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        gradient: KnowNoKnowTheme.cardGradient,
-        borderRadius: BorderRadius.circular(24),
-        border: Border.all(color: KnowNoKnowTheme.stroke, width: 1.2),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.12),
-            blurRadius: 26,
-            spreadRadius: 2,
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            title,
-            style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                  color: KnowNoKnowTheme.mutedInk,
-                  fontWeight: FontWeight.w900,
-                  letterSpacing: 0.6,
-                ),
-          ),
-          const SizedBox(height: 10),
-          ...bullets.map(
-            (b) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Icon(
-                    Icons.check_circle_rounded,
-                    color: KnowNoKnowTheme.primary,
-                    size: 18,
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      b,
-                      style: const TextStyle(
-                        color: KnowNoKnowTheme.ink,
-                        fontWeight: FontWeight.w900,
-                        height: 1.2,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
+  Widget _buttonWrapper(Widget child) {
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 320),
+        child: SizedBox(
+          height: 60,
+          width: double.infinity,
+          child: child,
+        ),
       ),
     );
   }

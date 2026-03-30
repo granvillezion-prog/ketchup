@@ -1,5 +1,6 @@
 // lib/app_router.dart
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 
 import 'storage.dart';
 import 'app_state.dart';
@@ -9,16 +10,27 @@ import 'theme/know_no_know_theme.dart';
 import 'screens/auth_screen.dart';
 import 'screens/profile_screen.dart';
 import 'screens/circle_screen.dart';
-import 'screens/today_screen.dart';
 import 'screens/call_screen.dart';
 import 'screens/reveal_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/plus_paywall_screen.dart';
+import 'screens/app_shell.dart';
+import 'screens/choose_username_screen.dart';
+import 'screens/phone_screen.dart';
+import 'screens/login_screen.dart';
+import 'screens/contacts_sync_screen.dart';
+import 'screens/icon_picker_screen.dart';
 
 class AppRouter {
   static const splash = '/';
   static const auth = '/auth';
+
+  static const phone = '/phone';
+  static const login = '/login';
   static const profile = '/profile';
+  static const username = '/username';
+  static const contacts = '/contacts';
+
   static const circle = '/circle';
   static const today = '/today';
   static const call = '/call';
@@ -26,32 +38,78 @@ class AppRouter {
   static const settings = '/settings';
   static const plus = '/plus';
 
-  /// ✅ Convenience: open the Plus paywall from anywhere
+  static const iconPicker = '/iconPicker';
+
+  static Widget buildSplash() => const _SplashGate();
+
   static Future<void> openPlus(BuildContext context) async {
     await Navigator.pushNamed(context, plus);
   }
 
   static Route<dynamic> onGenerateRoute(RouteSettings routeSettings) {
-    switch (routeSettings.name) {
+    final name = routeSettings.name ?? '';
+
+    switch (name) {
       case splash:
         return _fade(const _SplashGate());
+
       case auth:
         return _slide(const AuthScreen());
+
+      case phone:
+        return _slide(const PhoneScreen());
+
+      case login:
+        return _slide(const LoginScreen());
+
       case profile:
         return _slide(const ProfileScreen());
+
+      case username:
+        return _slide(const ChooseUsernameScreen());
+
+      case contacts:
+        return _slide(const ContactsSyncScreen());
+
       case circle:
         return _slide(const CircleScreen());
+
       case today:
-        return _slide(const TodayScreen());
+        return _slide(const AppShell(initialIndex: 0));
+
       case call:
-        return _slide(const _CallGate());
+  return PageRouteBuilder(
+    transitionDuration: const Duration(milliseconds: 120),
+    reverseTransitionDuration: const Duration(milliseconds: 120),
+    pageBuilder: (_, __, ___) => const _CallGate(),
+    transitionsBuilder: (_, anim, __, child) {
+      return FadeTransition(
+        opacity: CurvedAnimation(
+          parent: anim,
+          curve: Curves.easeOut,
+        ),
+        child: child,
+      );
+    },
+  );
+
       case reveal:
         return _popFade(const _RevealGate());
+
       case settings:
         return _slide(const SettingsScreen());
+
       case plus:
         return _popFade(const PlusPaywallScreen());
+
+      case iconPicker:
+        return _slide(const IconPickerScreen());
+
       default:
+        assert(() {
+          print('⚠️ Unknown route: "$name"');
+          return true;
+        }());
         return _fade(const _UnknownRoute());
     }
   }
@@ -91,6 +149,7 @@ class AppRouter {
           begin: const Offset(0.06, 0),
           end: Offset.zero,
         ).animate(curved);
+
         return SlideTransition(
           position: offset,
           child: FadeTransition(opacity: curved, child: child),
@@ -100,9 +159,6 @@ class AppRouter {
   }
 }
 
-/// ---------------------------------------------------------------------------
-/// CALL route gate
-/// ---------------------------------------------------------------------------
 class _CallGate extends StatefulWidget {
   const _CallGate();
 
@@ -121,14 +177,12 @@ class _CallGateState extends State<_CallGate> {
   }
 
   Future<void> _boot() async {
-    // If no circle, send to Circle first
-    if (AppStorage.getCircle().isEmpty) {
+    if (!AppStorage.hasMinimumCircleMembers()) {
       if (!mounted) return;
       Navigator.pushReplacementNamed(context, AppRouter.circle);
       return;
     }
 
-    // Ensure today's pair is created/hydrated
     final p = await AppState.ensureTodayPair();
     if (!mounted) return;
 
@@ -142,7 +196,6 @@ class _CallGateState extends State<_CallGate> {
       _loading = false;
     });
 
-    // If timer was started and already at 0, finish immediately.
     final remaining = AppState.getRemainingCallSeconds();
     if (remaining != null && remaining <= 0) {
       await AppState.markCallComplete();
@@ -161,10 +214,9 @@ class _CallGateState extends State<_CallGate> {
 
     return CallScreen(
       hiddenName: pair.hiddenName,
-      phone: pair.phone, // ✅ keep your existing signature
+      phone: pair.phone,
       onConnect: () {},
       onComplete: () async {
-        await AppState.markCallComplete();
         if (!context.mounted) return;
         Navigator.pushReplacementNamed(context, AppRouter.reveal);
       },
@@ -172,9 +224,6 @@ class _CallGateState extends State<_CallGate> {
   }
 }
 
-/// ---------------------------------------------------------------------------
-/// REVEAL route gate
-/// ---------------------------------------------------------------------------
 class _RevealGate extends StatefulWidget {
   const _RevealGate();
 
@@ -192,14 +241,12 @@ class _RevealGateState extends State<_RevealGate> {
   }
 
   Future<void> _boot() async {
-    // If no circle, can't reveal anything.
-    if (AppStorage.getCircle().isEmpty) {
+    if (!AppStorage.hasMinimumCircleMembers()) {
       if (!mounted) return;
       Navigator.pushReplacementNamed(context, AppRouter.circle);
       return;
     }
 
-    // Ensure pair exists/hydrated
     await AppState.ensureTodayPair();
     if (!mounted) return;
 
@@ -209,7 +256,6 @@ class _RevealGateState extends State<_RevealGate> {
       return;
     }
 
-    // Hard gate: only allow reveal if completed
     if (!pair.callCompleted) {
       final remaining = AppState.getRemainingCallSeconds();
       final hasActive = remaining != null && remaining > 0;
@@ -232,7 +278,6 @@ class _RevealGateState extends State<_RevealGate> {
   }
 }
 
-/// Simple consistent loading shell
 class _LoadingShell extends StatelessWidget {
   const _LoadingShell();
 
@@ -250,9 +295,9 @@ class _GradientLoading extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: const BoxDecoration(gradient: KnowNoKnowTheme.bgGradient),
-      child: const Center(child: CircularProgressIndicator()),
+    return const DecoratedBox(
+      decoration: BoxDecoration(gradient: KnowNoKnowTheme.bgGradient),
+      child: Center(child: CircularProgressIndicator()),
     );
   }
 }
@@ -272,24 +317,28 @@ class _SplashGateState extends State<_SplashGate> {
   }
 
   Future<void> _route() async {
-    await Future<void>.delayed(const Duration(milliseconds: 420));
+    await Future<void>.delayed(const Duration(milliseconds: 260));
 
-    final authed = AppStorage.isAuthed();
-    if (!authed) {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
       if (!mounted) return;
       Navigator.pushReplacementNamed(context, AppRouter.auth);
       return;
     }
 
-    final profileDone = AppStorage.isProfileComplete();
-    if (!profileDone) {
+    if (!AppStorage.isProfileComplete()) {
       if (!mounted) return;
       Navigator.pushReplacementNamed(context, AppRouter.profile);
       return;
     }
 
-    final hasCircle = AppStorage.getCircle().isNotEmpty;
-    if (!hasCircle) {
+    if (!AppStorage.areContactsSynced()) {
+      if (!mounted) return;
+      Navigator.pushReplacementNamed(context, AppRouter.contacts);
+      return;
+    }
+
+    if (!AppStorage.hasMinimumCircleMembers()) {
       if (!mounted) return;
       Navigator.pushReplacementNamed(context, AppRouter.circle);
       return;
@@ -323,24 +372,13 @@ class _SplashGateState extends State<_SplashGate> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Container(
+                SizedBox(
                   width: 74,
                   height: 74,
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(18),
-                    gradient: KnowNoKnowTheme.accentGradient,
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.18),
-                        blurRadius: 18,
-                        spreadRadius: 1,
-                      ),
-                    ],
-                  ),
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(18),
                     child: Image.asset(
-                      'assets/app_icon_work.png',
+                      'assets/logo.jpg',
                       fit: BoxFit.cover,
                       errorBuilder: (_, __, ___) {
                         return const Icon(

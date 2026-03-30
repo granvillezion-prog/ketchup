@@ -1,13 +1,14 @@
 name: ketchup
 description: "Know No Know prototype."
 publish_to: "none"
-version: 1.0.0+1
+version: 1.0.0+12
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
 
 dependencies:
   flutter:
+
     sdk: flutter
 
   cupertino_icons: ^1.0.8
@@ -16,23 +17,55 @@ dependencies:
   url_launcher: ^6.3.0
   flutter_animate: ^4.5.0
 
-  # Firebase
   firebase_core: ^3.5.0
   firebase_auth: ^5.3.0
   cloud_firestore: ^5.4.0
+  camera: ^0.11.0+2
+  # ✅ OAuth providers
+  google_sign_in: ^6.2.1
+  sign_in_with_apple: ^6.1.4
+
+  # ✅ NEW: profile photo picking + upload
+  image_picker: ^1.0.7
+  firebase_storage: ^12.3.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
-
-  # App launcher icons
   flutter_launcher_icons: ^0.13.1
 
 flutter:
   uses-material-design: true
+
   assets:
     - assets/app_icon_work.png
+    - assets/CellyBackground.png
+    - assets/auth_screen.jpg
+    - assets/today_screen.jpg
+    - assets/today_screen2.jpg
+    - assets/today_screen3.jpg
+    - assets/today_screen4.jpg
+    - assets/phone.png
+    - assets/logo.jpg
+    - assets/logo3.png
+    - assets/logo_black.png
+    - assets/logo2.jpg
+    # add any others here
+  fonts:
+    - family: VT323
+      fonts:
+        - asset: assets/fonts/VT323-Regular.ttf
+
+    - family: Jersey25
+      fonts:
+        - asset: assets/fonts/Jersey25-Regular.ttf
+          weight: 400
+
+    - family: PermanentMarker
+      fonts:
+        - asset: assets/fonts/PermanentMarker-Regular.ttf
+    
 
 flutter_icons:
   android: true
@@ -40,4 +73,3 @@ flutter_icons:
   image_path: "assets/app_icon_work.png"
   min_sdk_android: 21
   remove_alpha_ios: true
-

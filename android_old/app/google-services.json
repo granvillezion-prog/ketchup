@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "1050913441068",
+    "project_id": "ketchup-c2079",
+    "storage_bucket": "ketchup-c2079.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1050913441068:android:68322814a47b611b071889",
+        "android_client_info": {
+          "package_name": "com.example.ketchup"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA-1pXFPjb2yaWmYUXQDugwt278uNjfzQ4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1050913441068:android:627515a980944269071889",
+        "android_client_info": {
+          "package_name": "com.knownoknow.ketchup"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA-1pXFPjb2yaWmYUXQDugwt278uNjfzQ4"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

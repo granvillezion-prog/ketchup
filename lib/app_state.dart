@@ -1,196 +1,403 @@
-// lib/app_state.dart
-import 'dart:math' show max;
+import 'dart:math' as math;
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 import 'models.dart';
 import 'storage.dart';
-import 'services/progress_service.dart';
 import 'services/daily_pair_service.dart';
+import 'services/friends_graph_service.dart';
+import 'services/progress_service.dart';
 
 class AppState {
-  /// Optional fallback questions (main question text should come from DailyPairService)
-  static const List<MockQuestion> questions = <MockQuestion>[
-    MockQuestion(id: 'q0', text: 'What’s something that made you laugh recently?'),
-    MockQuestion(id: 'q1', text: 'What’s your favorite meal ever?'),
-    MockQuestion(id: 'q2', text: 'What’s one habit you’re trying to build?'),
-    MockQuestion(id: 'q3', text: 'What’s a memory you keep replaying lately?'),
-  ];
+// ------------------------------------------------------------
+// CONFIG
+// ------------------------------------------------------------
 
-  static MockQuestion getQuestionById(String id) {
-    return questions.firstWhere(
-      (q) => q.id == id,
-      orElse: () => questions.first,
-    );
-  }
+static const int baseCallSeconds = 300; // 5 min
+static const int extensionSeconds = 300;
 
-  static DateTime _startOfDay(DateTime d) => DateTime(d.year, d.month, d.day);
+static const String _answersCol = 'daily_answers';
 
-  /// ✅ Option C: if a call is in progress, "today" is the call-start day.
-  static String todayKey() => DailyPairService.effectiveKeyNowOrCallStart();
+// local extension tracking
+static bool _extendedOnce = false;
 
-  /// Ensures there is a today pair (DailyPairService is the source of truth)
-  static Future<MockPair?> ensureTodayPair() async {
-    await DailyPairService.ensureTodayPair();
-    return AppStorage.getTodayPair();
-  }
+// ------------------------------------------------------------
+// QUESTIONS
+// ------------------------------------------------------------
 
-  // ---------------------------------------------------------------------------
-  // TIMER / RESUME (+ extend persistence)
-  // ---------------------------------------------------------------------------
+static const List<MockQuestion> _questions = [
+MockQuestion(
+id: 'q1',
+text: 'What’s something you’re excited about right now?',
+),
+MockQuestion(
+id: 'q2',
+text: 'What’s been weighing on you lately?',
+),
+MockQuestion(
+id: 'q3',
+text: 'What’s one win from this week?',
+),
+MockQuestion(
+id: 'q4',
+text: 'What’s a memory you still laugh about?',
+),
+MockQuestion(
+id: 'q5',
+text: 'If you could redo one decision, what would it be?',
+),
+];
 
-  static const int baseCallSeconds = 300; // 5 minutes
-  static const int extendSeconds = 300; // +5 minutes
-  static const int extendedTotalSeconds = baseCallSeconds + extendSeconds; // 600
+static MockQuestion getQuestionById(String id) {
+return _questions.firstWhere(
+(q) => q.id == id,
+orElse: () => _questions.first,
+);
+}
 
-  /// Returns remaining seconds for the active call if it was started, else null.
-  /// - null => call hasn't started (JOIN not pressed)
-  /// - 0..totalSeconds => call was started; how many seconds remain
-  static int? getRemainingCallSeconds() {
-    final startedAtMs = AppStorage.getCallStartedAt();
-    if (startedAtMs == null) return null;
+static String _todayKey() {
+final now = DateTime.now();
+return '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+}
 
-    final total = AppStorage.getCallTotalSeconds() ?? baseCallSeconds;
+static String _yesterdayKey() {
+final now = DateTime.now().subtract(const Duration(days: 1));
+return '${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}';
+}
 
-    final nowMs = DateTime.now().millisecondsSinceEpoch;
-    final elapsedSec = ((nowMs - startedAtMs) / 1000).floor();
-    final remaining = total - elapsedSec;
+static bool _isSameDay(MockPair p) => p.dateKey == _todayKey();
 
-    if (remaining <= 0) return 0;
-    if (remaining > total) return total;
-    return remaining;
-  }
+// ------------------------------------------------------------
+// PAIR LOGIC
+// ------------------------------------------------------------
 
-  /// True if the timer has started (JOIN happened) and has not been cleared yet.
-  static bool hasCallStarted() => AppStorage.getCallStartedAt() != null;
+static Future<MockPair?> ensureTodayPair() async {
+final today = _todayKey();
 
-  /// Safe start: sets startedAt only once and initializes total seconds to 5:00.
-  static Future<void> setCallStartedNowIfEmpty() async {
-    final existing = AppStorage.getCallStartedAt();
-    if (existing != null) return;
+final existing = AppStorage.getTodayPair();
+if (existing != null && existing.dateKey == today) return existing;
 
-    await AppStorage.setCallTotalSeconds(baseCallSeconds);
-    await AppStorage.setCallStartedAt(DateTime.now().millisecondsSinceEpoch);
-  }
+final circle = AppStorage.getCircle();
+if (circle.isEmpty) return null;
 
-  /// Extend once: total time becomes 10:00 (never shrinks).
-  static Future<void> markExtendedOnce() async {
-    final cur = AppStorage.getCallTotalSeconds() ?? baseCallSeconds;
-    if (cur >= extendedTotalSeconds) return;
-    await AppStorage.setCallTotalSeconds(extendedTotalSeconds);
-  }
+final hasRealPool = await FriendsGraphService.hasValidMatchPool(min: 1);
 
-  /// Clears persisted call state (use when call fully ends).
-  static Future<void> clearCallStarted() async {
-    await AppStorage.clearCallTimer();
-  }
+if (!hasRealPool) {
+final fallback = _buildNoRealMatchesPair(today);
+await AppStorage.setTodayPair(fallback);
+await clearCallStarted();
+return fallback;
+}
 
-  // ---------------------------------------------------------------------------
-  // Call completion:
-  // - awards points once per effective day key
-  // - updates streak
-  // - writes to Firestore + local storage
-  // - then advances (Plus) exactly once
-  // ---------------------------------------------------------------------------
+await DailyPairService.ensureTodayPair();
 
-  static Future<void> markCallComplete() async {
-    // ✅ Lock key up front (before we clear call timer)
-    final key = todayKey();
+final realPair = AppStorage.getTodayPair();
+if (realPair != null && realPair.dateKey == today) return realPair;
 
-    // Make sure user doc exists + load current day doc
-    await ProgressService.ensureUserDoc();
-    final day = await ProgressService.getDay(key);
+final fallback = _buildNoRealMatchesPair(today);
+await AppStorage.setTodayPair(fallback);
+await clearCallStarted();
+return fallback;
+}
 
-    // If already completed for this key, just sync local + cleanup
-    if (day != null && (day['callCompleted'] == true)) {
-      final local = AppStorage.getTodayPair();
-      if (local != null && !local.callCompleted) {
-        await AppStorage.setTodayPair(local.copyWith(callCompleted: true));
-      }
+static MockPair _buildNoRealMatchesPair(String today) {
+final q = _questions.first;
 
-      await clearCallStarted();
+return MockPair(
+dateKey: today,
+hiddenName: 'Add more friends',
+phone: '',
+questionId: q.id,
+questionText: q.text,
+answerText: '',
+myAnswerText: '',
+callCompleted: false,
+points: 0,
+currentStreak: 0,
+longestStreak: 0,
+lastCallAtMs: null,
+circleId: '',
+circleName: 'unmatched_priority_tomorrow',
+callIndex: 1,
+totalCalls: 1,
+);
+}
 
-      // ✅ Only advance once (Plus only)
-      await DailyPairService.advanceAfterCompletion();
-      return;
-    }
+// ------------------------------------------------------------
+// CALL CONTROL
+// ------------------------------------------------------------
 
-    // Pull current progress from Firestore (source of truth)
-    final progress = await ProgressService.getUserProgress();
-    final points = (progress['points'] ?? 0) as int;
-    final currentStreak = (progress['currentStreak'] ?? 0) as int;
-    final longestStreak = (progress['longestStreak'] ?? 0) as int;
-    final lastCallAtMs = progress['lastCallAtMs'] as int?;
+static bool isCallActive() {
+final started = AppStorage.getCallStartedAt();
+final total = AppStorage.getCallTotalSeconds();
+return started != null && total != null;
+}
 
-    // ✅ Streak logic should align with the effective key (call-start day),
-    // not always DateTime.now() (which could be "tomorrow" after midnight).
-    final nowForStreak = () {
-      final startedAt = AppStorage.getCallStartedAt();
-      if (startedAt == null) return DateTime.now();
-      return DateTime.fromMillisecondsSinceEpoch(startedAt);
-    }();
+static Future<bool> tryStartCall() async {
+if (isCallActive()) return false;
 
-    final last = lastCallAtMs == null
-        ? null
-        : DateTime.fromMillisecondsSinceEpoch(lastCallAtMs);
+final now = DateTime.now().millisecondsSinceEpoch;
 
-    int newCurrent;
-    if (last == null) {
-      newCurrent = 1;
-    } else {
-      final lastDay = _startOfDay(last);
-      final nowDay = _startOfDay(nowForStreak);
-      final diff = nowDay.difference(lastDay).inDays;
+await AppStorage.setCallStartedAt(now);
+await AppStorage.setCallTotalSeconds(baseCallSeconds);
 
-      if (diff == 0) {
-        newCurrent = currentStreak;
-      } else if (diff == 1) {
-        newCurrent = currentStreak + 1;
-      } else {
-        newCurrent = 1;
-      }
-    }
+_extendedOnce = false;
+return true;
+}
 
-    final newLongest = max(longestStreak, newCurrent);
+static int? getRemainingCallSeconds() {
+final startedAt = AppStorage.getCallStartedAt();
+final total = AppStorage.getCallTotalSeconds();
 
-    const pointsEarnedToday = 10;
-    final newPoints = points + pointsEarnedToday;
+if (startedAt == null || total == null) return null;
 
-    final nowMs = DateTime.now().millisecondsSinceEpoch;
+final now = DateTime.now().millisecondsSinceEpoch;
+final elapsed = ((now - startedAt) / 1000).floor();
 
-    // 1) Update Firestore user progress
-    await ProgressService.setUserProgress({
-      'points': newPoints,
-      'currentStreak': newCurrent,
-      'longestStreak': newLongest,
-      'lastCallAtMs': nowMs,
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
+final rem = total - elapsed;
+if (rem <= 0) return 0;
+return rem;
+}
 
-    // 2) Update Firestore day doc (merge)
-    await ProgressService.setDay(key, {
-      'callCompleted': true,
-      'completedAt': FieldValue.serverTimestamp(),
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
+static Future<bool> extendCallOnce() async {
+if (_extendedOnce) return false;
 
-    // 3) Update local cache so UI updates immediately
-    final local = AppStorage.getTodayPair();
-    if (local != null) {
-      await AppStorage.setTodayPair(
-        local.copyWith(
-          callCompleted: true,
-          points: newPoints,
-          currentStreak: newCurrent,
-          longestStreak: newLongest,
-          lastCallAtMs: nowMs,
-        ),
-      );
-    }
+final total = AppStorage.getCallTotalSeconds();
+if (total == null) return false;
 
-    // 4) Clear call timer persistence so the next call/day starts clean
-    await clearCallStarted();
+await AppStorage.setCallTotalSeconds(total + extensionSeconds);
+_extendedOnce = true;
+return true;
+}
 
-    // 5) ✅ After a completed call, move to the next call slot if allowed (Plus)
-    await DailyPairService.advanceAfterCompletion();
-  }
+static Future<void> clearCallStarted() async {
+await AppStorage.clearCallTimer();
+_extendedOnce = false;
+}
+
+// ------------------------------------------------------------
+// STREAK LOSS
+// ------------------------------------------------------------
+
+static Future<void> enforceStreakLossIfNeeded() async {
+await ProgressService.ensureUserDoc();
+
+final progress = await ProgressService.getUserProgress();
+final lastCompletedCallAtMs = progress['lastCompletedCallAtMs'];
+
+int? lastMs;
+if (lastCompletedCallAtMs is int) {
+lastMs = lastCompletedCallAtMs;
+} else if (lastCompletedCallAtMs is num) {
+lastMs = lastCompletedCallAtMs.toInt();
+}
+
+if (lastMs == null) return;
+
+final lastCompletedKey = ProgressService.dateKeyFor(
+DateTime.fromMillisecondsSinceEpoch(lastMs),
+);
+
+final today = _todayKey();
+final yesterday = _yesterdayKey();
+
+if (lastCompletedKey == today || lastCompletedKey == yesterday) {
+return;
+}
+
+final currentStreak = (progress['currentStreak'] ?? 0) as int;
+if (currentStreak == 0) return;
+
+await ProgressService.setUserProgress({
+'currentStreak': 0,
+});
+}
+
+// ------------------------------------------------------------
+// CALL COMPLETE / DAILY STREAK
+// ------------------------------------------------------------
+
+static Future<void> markCallComplete() async {
+final pair = AppStorage.getTodayPair();
+if (pair == null) return;
+
+if (!_isSameDay(pair)) {
+await ensureTodayPair();
+await clearCallStarted();
+return;
+}
+
+await enforceStreakLossIfNeeded();
+
+if (pair.callCompleted) {
+await clearCallStarted();
+return;
+}
+
+final now = DateTime.now().millisecondsSinceEpoch;
+final today = _todayKey();
+final yesterday = _yesterdayKey();
+
+final progress = await ProgressService.getUserProgress();
+
+final oldPoints = (progress['points'] ?? pair.points) as int;
+final oldCurrentStreak =
+(progress['currentStreak'] ?? pair.currentStreak) as int;
+final oldLongestStreak =
+(progress['longestStreak'] ?? pair.longestStreak) as int;
+
+final rawLastCompleted = progress['lastCompletedCallAtMs'];
+
+int? lastCompletedMs;
+if (rawLastCompleted is int) {
+lastCompletedMs = rawLastCompleted;
+} else if (rawLastCompleted is num) {
+lastCompletedMs = rawLastCompleted.toInt();
+}
+
+final completedToday = lastCompletedMs != null &&
+ProgressService.dateKeyFor(
+DateTime.fromMillisecondsSinceEpoch(lastCompletedMs),
+) ==
+today;
+
+final int nextPoints;
+final int nextCurrentStreak;
+final int nextLongestStreak;
+
+if (completedToday) {
+nextPoints = oldPoints;
+nextCurrentStreak = oldCurrentStreak;
+nextLongestStreak = oldLongestStreak;
+} else {
+final completedYesterday = lastCompletedMs != null &&
+ProgressService.dateKeyFor(
+DateTime.fromMillisecondsSinceEpoch(lastCompletedMs),
+) ==
+yesterday;
+
+nextPoints = oldPoints + 1;
+nextCurrentStreak = completedYesterday ? oldCurrentStreak + 1 : 1;
+nextLongestStreak = math.max(oldLongestStreak, nextCurrentStreak);
+}
+
+final updated = pair.copyWith(
+callCompleted: true,
+lastCallAtMs: now,
+points: nextPoints,
+currentStreak: nextCurrentStreak,
+longestStreak: nextLongestStreak,
+);
+
+await AppStorage.setTodayPair(updated);
+
+await ProgressService.markCallCompletedNow();
+
+await ProgressService.setUserProgress({
+'points': nextPoints,
+'currentStreak': nextCurrentStreak,
+'longestStreak': nextLongestStreak,
+'lastCallAtMs': now,
+'lastCompletedCallAtMs': now,
+'lastActiveAtMs': now,
+});
+
+final existingDay =
+await ProgressService.getDay(today) ?? <String, dynamic>{};
+
+await ProgressService.setDay(today, {
+...existingDay,
+'hiddenName': updated.hiddenName,
+'phone': updated.phone,
+'questionId': updated.questionId,
+'questionText': updated.questionText,
+'answerText': updated.answerText,
+'myAnswerText': updated.myAnswerText,
+'callCompleted': true,
+'completedAtMs': now,
+'lastCallAtMs': now,
+'points': nextPoints,
+'currentStreak': nextCurrentStreak,
+'longestStreak': nextLongestStreak,
+'circleId': updated.circleId,
+'circleName': updated.circleName,
+'callIndex': updated.callIndex,
+'totalCalls': updated.totalCalls,
+});
+
+await clearCallStarted();
+}
+
+// ------------------------------------------------------------
+// ANSWERS
+// ------------------------------------------------------------
+
+static String _sanitizeAnswer(String raw) {
+final t = raw.trim();
+if (t.isEmpty) return '';
+return t.length > 140 ? t.substring(0, 140) : t;
+}
+
+static Future<MockPair?> sendMyAnswerAnonymous(String raw) async {
+final ensured = await ensureTodayPair();
+if (ensured == null) return null;
+
+final text = _sanitizeAnswer(raw);
+if (text.isEmpty) return ensured;
+
+final myUsername = AppStorage.getProfileUsername().trim();
+final recipientUsername = ensured.hiddenName.trim();
+
+if (myUsername.isEmpty || recipientUsername.isEmpty) return ensured;
+
+final updated = ensured.copyWith(myAnswerText: text);
+await AppStorage.setTodayPair(updated);
+
+final today = _todayKey();
+final rand = math.Random().nextInt(1 << 32).toString();
+
+await FirebaseFirestore.instance
+.collection(_answersCol)
+.doc('${today}__${recipientUsername}__${rand}')
+.set({
+'dateKey': today,
+'recipient': recipientUsername,
+'answerText': text,
+'createdAt': FieldValue.serverTimestamp(),
+});
+
+return updated;
+}
+
+static Future<MockPair?> pollIncomingAnonymousAnswer() async {
+final pair = await ensureTodayPair();
+if (pair == null) return null;
+
+final myUsername = AppStorage.getProfileUsername().trim();
+if (myUsername.isEmpty) return pair;
+
+final today = _todayKey();
+
+try {
+final qs = await FirebaseFirestore.instance
+.collection(_answersCol)
+.where('dateKey', isEqualTo: today)
+.where('recipient', isEqualTo: myUsername)
+.orderBy('createdAt', descending: true)
+.limit(1)
+.get();
+
+if (qs.docs.isEmpty) return pair;
+
+final incoming = (qs.docs.first.data()['answerText'] ?? '').toString();
+if (incoming.isEmpty) return pair;
+
+final updated = pair.copyWith(answerText: incoming);
+await AppStorage.setTodayPair(updated);
+
+return updated;
+} catch (_) {
+return pair;
+}
+}
 }
