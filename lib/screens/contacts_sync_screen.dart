@@ -31,18 +31,20 @@ class _ContactsSyncScreenState extends State<ContactsSyncScreen> {
   static const bool kDevBypassContacts = true;
 
   @override
-  void initState() {
-    super.initState();
+void initState() {
+  super.initState();
 
-    if (kDevBypassContacts) {
-      _loading = false;
-      return;
-    }
+  print("🔥 CONTACT SCREEN INIT HIT"); // <-- ADD THIS LINE
 
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _boot();
-    });
+  if (kDevBypassContacts) {
+    _loading = false;
+    return;
   }
+
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    _boot();
+  });
+}
 
   Future<void> _boot() async {
     if (!mounted) return;
