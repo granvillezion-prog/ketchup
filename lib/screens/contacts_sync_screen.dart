@@ -1,702 +1,543 @@
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter_contacts/flutter_contacts.dart';
+import Foundation
+import FirebaseFirestore
 
-import '../app_router.dart';
-import '../auth/auth_service.dart';
-import '../services/firestore_service.dart';
-import '../storage.dart';
-import '../theme/know_no_know_theme.dart';
+public final class FirestoreService {
+    public static func normalizeUsername(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
 
-class ContactsSyncScreen extends StatefulWidget {
-  const ContactsSyncScreen({super.key});
+    public static func normalizePhone(_ raw: String) -> String {
+        let digits = raw
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .unicodeScalars
+            .filter(CharacterSet.decimalDigits.contains)
+            .map(String.init)
+            .joined()
 
-  @override
-  State<ContactsSyncScreen> createState() => _ContactsSyncScreenState();
-}
+        return digits.isEmpty ? "" : "+\(digits)"
+    }
 
-class _ContactsSyncScreenState extends State<ContactsSyncScreen> {
-  bool _loading = true;
-  bool _saving = false;
-  String? _error;
+    public static func buildSearchTokens(displayName: String, username: String) -> [String] {
+        let displayToken = cleanToken(displayName)
+        let usernameToken = cleanToken(username)
 
-  List<_LocalContact> _all = [];
-  List<_AppUserContact> _onApp = [];
-  List<_LocalContact> _notOnApp = [];
-
-  final Set<String> _selectedUids = {};
-  final Set<String> _selectedLocalKeys = {};
-
-  static const int minPick = AppStorage.minCircleMembersToUnlock;
-  static const bool kDevBypassContacts = true;
-
-  @override
-void initState() {
-  super.initState();
-
-  print("🔥 CONTACT SCREEN INIT HIT"); // <-- ADD THIS LINE
-
-  if (kDevBypassContacts) {
-    _loading = false;
-    return;
-  }
-
-  WidgetsBinding.instance.addPostFrameCallback((_) {
-    _boot();
-  });
-}
-
-  Future<void> _boot() async {
-    if (!mounted) return;
-
-    try {
-      setState(() {
-        _loading = true;
-        _error = null;
-      });
-
-      if (FirebaseAuth.instance.currentUser == null) {
-        await AuthService.ensureSignedIn();
-      }
-
-      bool permitted = false;
-      try {
-        permitted = await FlutterContacts.requestPermission();
-      } catch (e) {
-        if (!mounted) return;
-        setState(() {
-          _loading = false;
-          _error = 'Failed to request contacts permission. ($e)';
-        });
-        return;
-      }
-
-      if (!permitted) {
-        if (!mounted) return;
-        setState(() {
-          _loading = false;
-          _error = 'Contacts permission denied.';
-        });
-        return;
-      }
-
-      List<Contact> contacts;
-      try {
-        contacts = await FlutterContacts.getContacts(withProperties: true);
-      } catch (e) {
-        if (!mounted) return;
-        setState(() {
-          _loading = false;
-          _error = 'Failed to load contacts. ($e)';
-        });
-        return;
-      }
-
-      final locals = <_LocalContact>[];
-
-      for (final c in contacts) {
-        final name = [c.name.first, c.name.last]
-            .where((x) => x.trim().isNotEmpty)
-            .join(' ')
-            .trim();
-
-        final phones = c.phones.map((p) => p.number).toList();
-        if (name.isEmpty || phones.isEmpty) continue;
-
-        locals.add(_LocalContact(name: name, phones: phones));
-      }
-
-      final phoneSet = <String>{};
-      for (final lc in locals) {
-        for (final raw in lc.phones) {
-          final e164 = _toE164Guess(raw);
-          if (e164.isNotEmpty) phoneSet.add(e164);
+        var base: [String] = []
+        if !displayToken.isEmpty {
+            base.append(displayToken)
         }
-      }
-
-      final fs = FirestoreService(AuthService.uid);
-      final phoneToUid = await fs.lookupExistingUsersByPhones(phoneSet.toList());
-      final uids = phoneToUid.values.toSet().toList();
-      final profiles = await fs.getPublicProfilesByUids(uids);
-      final uidToProfile = {for (final p in profiles) p.uid: p};
-
-      final onApp = <_AppUserContact>[];
-      final usedUid = <String>{};
-
-      for (final entry in phoneToUid.entries) {
-        final uid = entry.value;
-        if (usedUid.contains(uid)) continue;
-
-        final prof = uidToProfile[uid];
-        if (prof == null) continue;
-
-        usedUid.add(uid);
-        onApp.add(
-          _AppUserContact(
-            uid: uid,
-            displayName: prof.displayName.isEmpty ? 'Unknown' : prof.displayName,
-            username: prof.username,
-          ),
-        );
-      }
-
-      onApp.sort(
-        (a, b) => a.displayName.toLowerCase().compareTo(
-              b.displayName.toLowerCase(),
-            ),
-      );
-
-      final notOn = <_LocalContact>[];
-      for (final lc in locals) {
-        var anyMatch = false;
-        for (final raw in lc.phones) {
-          final e164 = _toE164Guess(raw);
-          if (e164.isNotEmpty && phoneToUid.containsKey(e164)) {
-            anyMatch = true;
-            break;
-          }
+        if !usernameToken.isEmpty {
+            base.append(usernameToken)
         }
-        if (!anyMatch) notOn.add(lc);
-      }
 
-      notOn.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+        let words = displayToken
+            .split(separator: " ")
+            .map(String.init)
+            + usernameToken.split(separator: " ").map(String.init)
 
-      if (!mounted) return;
-      setState(() {
-        _all = locals;
-        _onApp = onApp;
-        _notOnApp = notOn;
-        _loading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() {
-        _loading = false;
-        _error = 'Failed to sync contacts. ($e)';
-      });
-    }
-  }
+        if !displayToken.isEmpty {
+            base.append(displayToken.replacingOccurrences(of: " ", with: ""))
+        }
+        if !usernameToken.isEmpty {
+            base.append(usernameToken.replacingOccurrences(of: " ", with: ""))
+        }
 
-  String _toE164Guess(String raw) {
-    final d = raw.replaceAll(RegExp(r'[^0-9]'), '');
-    if (d.length == 10) return '+1$d';
-    if (d.length == 11 && d.startsWith('1')) return '+$d';
-    if (raw.trim().startsWith('+') && d.length >= 8) return '+$d';
-    return '';
-  }
+        var tokenSet = Set<String>()
 
-  int get _selectedCount => _selectedUids.length + _selectedLocalKeys.length;
-  bool get _meetsMin => _selectedCount >= minPick;
+        func addWithPrefixes(_ word: String) {
+            let trimmed = word.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                return
+            }
 
-  void _toggleOnApp(_AppUserContact u) {
-    setState(() {
-      if (_selectedUids.contains(u.uid)) {
-        _selectedUids.remove(u.uid);
-      } else {
-        _selectedUids.add(u.uid);
-      }
-      _error = null;
-    });
-  }
+            tokenSet.insert(trimmed)
 
-  String _bestPhoneKey(_LocalContact c) {
-    for (final raw in c.phones) {
-      final e164 = _toE164Guess(raw);
-      if (e164.isNotEmpty) return e164;
-    }
-    return '';
-  }
+            let maxPrefixLength = min(trimmed.count, 10)
+            guard maxPrefixLength >= 2 else {
+                return
+            }
 
-  void _toggleLocal(_LocalContact c) {
-    final best = _bestPhoneKey(c);
-    final key = '${c.name}|$best';
+            for length in 2...maxPrefixLength {
+                tokenSet.insert(String(trimmed.prefix(length)))
+            }
+        }
 
-    setState(() {
-      if (_selectedLocalKeys.contains(key)) {
-        _selectedLocalKeys.remove(key);
-      } else {
-        _selectedLocalKeys.add(key);
-      }
-      _error = null;
-    });
-  }
+        for value in base {
+            addWithPrefixes(value)
+        }
+        for value in words where !value.isEmpty {
+            addWithPrefixes(value)
+        }
 
-  Future<void> _devSkip() async {
-    if (_saving) return;
+        let sorted = tokenSet.sorted { lhs, rhs in
+            if lhs.count == rhs.count {
+                return lhs < rhs
+            }
+            return lhs.count < rhs.count
+        }
 
-    setState(() {
-      _saving = true;
-      _error = null;
-    });
-
-    try {
-      if (FirebaseAuth.instance.currentUser == null) {
-        await AuthService.ensureSignedIn();
-      }
-
-      final fs = FirestoreService(AuthService.uid);
-      final circleId = await fs.ensureDefaultCircleId();
-
-      final seed = <CircleSeedMember>[
-        CircleSeedMember(
-          memberId: 'dev_1',
-          displayName: 'Test Friend 1',
-          onKetchUp: false,
-          phoneE164: '+15555550101',
-        ),
-        CircleSeedMember(
-          memberId: 'dev_2',
-          displayName: 'Test Friend 2',
-          onKetchUp: false,
-          phoneE164: '+15555550102',
-        ),
-        CircleSeedMember(
-          memberId: 'dev_3',
-          displayName: 'Test Friend 3',
-          onKetchUp: false,
-          phoneE164: '+15555550103',
-        ),
-        CircleSeedMember(
-          memberId: 'dev_4',
-          displayName: 'Test Friend 4',
-          onKetchUp: false,
-          phoneE164: '+15555550104',
-        ),
-        CircleSeedMember(
-          memberId: 'dev_5',
-          displayName: 'Test Friend 5',
-          onKetchUp: false,
-          phoneE164: '+15555550105',
-        ),
-      ];
-
-      await fs.addMembersBulk(circleId: circleId, members: seed);
-      await AppStorage.setContactsSynced(true);
-      await AppStorage.setAddFriendsDone(true);
-
-      if (!mounted) return;
-      Navigator.pushNamedAndRemoveUntil(
-        context,
-        AppRouter.circle,
-        (_) => false,
-      );
-    } catch (e) {
-      setState(() => _error = 'Dev skip failed. ($e)');
-    } finally {
-      if (!mounted) return;
-      setState(() => _saving = false);
-    }
-  }
-
-  Future<void> _continue() async {
-    if (_saving) return;
-
-    if (!kDevBypassContacts && !_meetsMin) {
-      setState(() => _error = 'Pick at least $minPick people.');
-      return;
+        return Array(sorted.prefix(80))
     }
 
-    setState(() {
-      _saving = true;
-      _error = null;
-    });
+    private let uid: String
+    private let db: Firestore
 
-    try {
-      final fs = FirestoreService(AuthService.uid);
-      final circleId = await fs.ensureDefaultCircleId();
-
-      final members = <CircleSeedMember>[];
-
-      for (final u in _onApp) {
-        if (!_selectedUids.contains(u.uid)) continue;
-
-        members.add(
-          CircleSeedMember(
-            memberId: 'uid_${u.uid}',
-            displayName: u.displayName,
-            onKetchUp: true,
-            uid: u.uid,
-            username: u.username,
-          ),
-        );
-      }
-
-      for (final c in _notOnApp) {
-        final best = _bestPhoneKey(c);
-        final key = '${c.name}|$best';
-        if (!_selectedLocalKeys.contains(key)) continue;
-
-        final e164 = FirestoreService.normalizePhone(best);
-        final stable = e164.isNotEmpty
-            ? 'phone_${e164.replaceAll('+', '')}'
-            : 'local_${c.name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '_')}_${c.name.hashCode.abs()}';
-
-        members.add(
-          CircleSeedMember(
-            memberId: stable,
-            displayName: c.name,
-            onKetchUp: false,
-            phoneE164: e164.isEmpty ? null : e164,
-          ),
-        );
-      }
-
-      if (kDevBypassContacts && members.isEmpty) {
-        members.addAll([
-          CircleSeedMember(
-            memberId: 'dev_1',
-            displayName: 'Test Friend 1',
-            onKetchUp: false,
-            phoneE164: '+15555550101',
-          ),
-          CircleSeedMember(
-            memberId: 'dev_2',
-            displayName: 'Test Friend 2',
-            onKetchUp: false,
-            phoneE164: '+15555550102',
-          ),
-          CircleSeedMember(
-            memberId: 'dev_3',
-            displayName: 'Test Friend 3',
-            onKetchUp: false,
-            phoneE164: '+15555550103',
-          ),
-          CircleSeedMember(
-            memberId: 'dev_4',
-            displayName: 'Test Friend 4',
-            onKetchUp: false,
-            phoneE164: '+15555550104',
-          ),
-          CircleSeedMember(
-            memberId: 'dev_5',
-            displayName: 'Test Friend 5',
-            onKetchUp: false,
-            phoneE164: '+15555550105',
-          ),
-        ]);
-      }
-
-      await fs.addMembersBulk(circleId: circleId, members: members);
-      await AppStorage.setContactsSynced(true);
-      await AppStorage.setAddFriendsDone(true);
-
-      if (!mounted) return;
-      Navigator.pushNamedAndRemoveUntil(
-        context,
-        AppRouter.circle,
-        (_) => false,
-      );
-    } catch (e) {
-      setState(() => _error = 'Failed to save. ($e)');
-    } finally {
-      if (!mounted) return;
-      setState(() => _saving = false);
+    public init(uid: String, firestore: Firestore = Firestore.firestore()) {
+        self.uid = uid
+        self.db = firestore
     }
-  }
 
-  @override
-  Widget build(BuildContext context) {
-    final selected = _selectedCount;
-    final meetsMinUi = kDevBypassContacts ? true : _meetsMin;
+    public func setDisplayName(displayName: String) async throws {
+        let name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else {
+            return
+        }
 
-    return Scaffold(
-      backgroundColor: Colors.transparent,
-      appBar: AppBar(
-        title: const Text(
-          'CONTACTS',
-          style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 0.6),
-        ),
-        actions: [
-          if (kDevBypassContacts)
-            TextButton(
-              onPressed: _saving ? null : _devSkip,
-              child: const Text(
-                'SKIP (DEV)',
-                style: TextStyle(fontWeight: FontWeight.w900),
-              ),
-            ),
-        ],
-      ),
-      body: Container(
-        decoration: const BoxDecoration(
-          image: DecorationImage(
-            image: AssetImage('assets/today_screen.jpg'),
-            fit: BoxFit.cover,
-          ),
-        ),
-        child: SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(18),
-            child: _loading
-                ? const Center(child: CircularProgressIndicator())
-                : Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Pick at least 5 people',
-                        style: TextStyle(
-                          color: KnowNoKnowTheme.ink,
-                          fontWeight: FontWeight.w900,
-                          fontSize: 26,
-                        ),
-                      ),
-                      const SizedBox(height: 6),
-                      Text(
-                        kDevBypassContacts
-                            ? 'DEV MODE: You can skip contacts while building.'
-                            : 'You need at least $minPick people to unlock your daily mystery call.',
-                        style: const TextStyle(
-                          color: KnowNoKnowTheme.mutedInk,
-                          fontWeight: FontWeight.w900,
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 10,
-                        ),
-                        decoration: BoxDecoration(
-                          color: KnowNoKnowTheme.panel,
-                          borderRadius: BorderRadius.circular(18),
-                          border: Border.all(
-                            color: KnowNoKnowTheme.stroke,
-                            width: 1.2,
-                          ),
-                        ),
-                        child: Row(
-                          children: [
-                            const Icon(
-                              Icons.check_circle_rounded,
-                              color: Colors.black,
-                              size: 20,
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text(
-                                kDevBypassContacts
-                                    ? 'Selected: $selected'
-                                    : 'Selected: $selected / $minPick',
-                                style: const TextStyle(
-                                  color: KnowNoKnowTheme.ink,
-                                  fontWeight: FontWeight.w900,
-                                ),
-                              ),
-                            ),
-                            Icon(
-                              meetsMinUi
-                                  ? Icons.lock_open_rounded
-                                  : Icons.lock_rounded,
-                              color: meetsMinUi
-                                  ? Colors.black
-                                  : KnowNoKnowTheme.mutedInk,
-                            ),
-                          ],
-                        ),
-                      ),
-                      if (_error != null) ...[
-                        const SizedBox(height: 10),
-                        Text(
-                          _error!,
-                          style: const TextStyle(
-                            color: KnowNoKnowTheme.primary,
-                            fontWeight: FontWeight.w900,
-                          ),
-                        ),
-                      ],
-                      const SizedBox(height: 14),
-                      Expanded(
-                        child: ListView(
-                          physics: const BouncingScrollPhysics(),
-                          children: [
-                            if (_onApp.isNotEmpty) ...[
-                              const _SectionTitle('Already on Know No Know'),
-                              const SizedBox(height: 8),
-                              ..._onApp.map((u) {
-                                final sel = _selectedUids.contains(u.uid);
-                                return _SelectableUserTile(
-                                  u: u,
-                                  selected: sel,
-                                  onTap: () => _toggleOnApp(u),
-                                );
-                              }),
-                              const SizedBox(height: 14),
-                            ],
-                            const _SectionTitle('From your contacts'),
-                            const SizedBox(height: 8),
-                            ..._notOnApp.map((c) {
-                              final key = '${c.name}|${_bestPhoneKey(c)}';
-                              final sel = _selectedLocalKeys.contains(key);
-                              return _SelectableLocalTile(
-                                c: c,
-                                selected: sel,
-                                onTap: () => _toggleLocal(c),
-                              );
-                            }),
-                            if (kDevBypassContacts && _all.isEmpty)
-                              const Padding(
-                                padding: EdgeInsets.only(top: 6),
-                                child: Text(
-                                  'No contacts loaded in dev mode yet.',
-                                  style: TextStyle(fontWeight: FontWeight.w800),
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(height: 12),
-                      SizedBox(
-                        width: double.infinity,
-                        height: 54,
-                        child: ElevatedButton(
-                          onPressed: _saving ? null : _continue,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.black,
-                            foregroundColor: Colors.white,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(18),
-                            ),
-                          ),
-                          child: Text(
-                            _saving ? 'SAVING...' : 'CONTINUE',
-                            style: const TextStyle(
-                              fontWeight: FontWeight.w900,
-                              letterSpacing: 0.8,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-          ),
-        ),
-      ),
-    );
-  }
+        let snapshot = try await userDoc.getDocument()
+        let data = snapshot.data() ?? [:]
+        let usernameLower = ((data["usernameLower"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let payload: [String: Any] = [
+            "displayName": name,
+            "displayNameLower": name.lowercased(),
+            "searchTokens": Self.buildSearchTokens(displayName: name, username: usernameLower),
+            "updatedAt": FieldValue.serverTimestamp(),
+        ]
+
+        try await userDoc.setData(payload, merge: true)
+        try await publicProfileDoc.setData(payload, merge: true)
+
+        if !usernameLower.isEmpty {
+            try await usernamesCollection.document(usernameLower).setData(
+                [
+                    "displayName": name,
+                    "updatedAt": FieldValue.serverTimestamp(),
+                ],
+                merge: true
+            )
+        }
+    }
+
+    public func updateProfilePhoto(photoUrl: String) async throws {
+        let url = photoUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !url.isEmpty else {
+            return
+        }
+
+        let snapshot = try await userDoc.getDocument()
+        let usernameLower = ((snapshot.data() ?? [:])["usernameLower"] as? String) ?? ""
+
+        let payload: [String: Any] = [
+            "photoUrl": url,
+            "updatedAt": FieldValue.serverTimestamp(),
+        ]
+
+        try await userDoc.setData(payload, merge: true)
+        try await publicProfileDoc.setData(payload, merge: true)
+
+        let normalizedUsername = usernameLower.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !normalizedUsername.isEmpty {
+            try await usernamesCollection.document(normalizedUsername).setData(payload, merge: true)
+        }
+    }
+
+    public func getPublicProfilesByUids(_ uids: [String]) async throws -> [PublicProfile] {
+        let cleaned = Array(Set(
+            uids
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        ))
+
+        guard !cleaned.isEmpty else {
+            return []
+        }
+
+        var profiles: [PublicProfile] = []
+        var found = Set<String>()
+
+        for chunk in cleaned.chunked(into: 10) {
+            let snapshot = try await publicProfilesCollection
+                .whereField(FieldPath.documentID(), in: chunk)
+                .getDocuments()
+
+            for document in snapshot.documents {
+                found.insert(document.documentID)
+                profiles.append(mapPublicProfile(documentID: document.documentID, data: document.data()))
+            }
+        }
+
+        let missing = cleaned.filter { !found.contains($0) }
+        for chunk in missing.chunked(into: 10) {
+            let snapshot = try await db
+                .collection("users")
+                .whereField(FieldPath.documentID(), in: chunk)
+                .getDocuments()
+
+            for document in snapshot.documents {
+                profiles.append(mapPublicProfile(documentID: document.documentID, data: document.data()))
+            }
+        }
+
+        return profiles
+    }
+
+    public func lookupExistingUsersByPhones(_ phones: [String]) async throws -> [String: String] {
+        let normalized = Array(Set(
+            phones
+                .map(Self.normalizePhone)
+                .filter { !$0.isEmpty }
+        ))
+
+        guard !normalized.isEmpty else {
+            return [:]
+        }
+
+        var output: [String: String] = [:]
+
+        for chunk in normalized.chunked(into: 10) {
+            let snapshot = try await phonesCollection
+                .whereField(FieldPath.documentID(), in: chunk)
+                .getDocuments()
+
+            for document in snapshot.documents {
+                let data = document.data()
+                let foundUid = strictStringOrEmpty(data["uid"])
+                if !foundUid.isEmpty {
+                    output[document.documentID] = foundUid
+                }
+            }
+        }
+
+        return output
+    }
+
+    public func ensureDefaultCircleId() async throws -> String {
+        try await ensureHasAtLeastOneCircle()
+
+        let snapshot = try await circlesCollection
+            .order(by: "index", descending: false)
+            .limit(to: 1)
+            .getDocuments()
+
+        if let first = snapshot.documents.first {
+            return first.documentID
+        }
+
+        return try await createCircle(name: "Circle 1", index: 0)
+    }
+
+    public func addMembersBulk(circleId: String, members: [CircleSeedMember]) async throws {
+        guard !members.isEmpty else {
+            return
+        }
+
+        let membersCollection = circlesCollection.document(circleId).collection("members")
+        let batch = db.batch()
+
+        for member in members {
+            var memberId = member.memberId.trimmingCharacters(in: .whitespacesAndNewlines)
+            if memberId.isEmpty {
+                memberId = generatedMemberId(for: member.displayName)
+            }
+
+            let cleanedUid = (member.uid ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanedName = member.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanedUsername = (member.username ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanedPhone = (member.phoneE164 ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let isRealUser = !cleanedUid.isEmpty
+
+            guard !cleanedName.isEmpty else {
+                continue
+            }
+
+            let payload = mapCircleSeedMemberPayload(
+                seed: member,
+                memberId: memberId,
+                cleanedUid: cleanedUid,
+                cleanedName: cleanedName,
+                cleanedUsername: cleanedUsername,
+                cleanedPhone: cleanedPhone,
+                isRealUser: isRealUser
+            )
+
+            batch.setData(payload, forDocument: membersCollection.document(memberId), merge: true)
+        }
+
+        try await batch.commit()
+    }
+
+    public func streamCircles() -> AsyncThrowingStream<[UserCircle], Error> {
+        AsyncThrowingStream { continuation in
+            let listener = circlesCollection
+                .order(by: "index", descending: false)
+                .addSnapshotListener { snapshot, error in
+                    if let error {
+                        continuation.finish(throwing: error)
+                        return
+                    }
+
+                    let circles = snapshot?.documents.map { document in
+                        self.mapUserCircle(documentID: document.documentID, data: document.data())
+                    } ?? []
+
+                    continuation.yield(circles)
+                }
+
+            continuation.onTermination = { _ in
+                listener.remove()
+            }
+        }
+    }
+
+    public func streamMembers(circleId: String) -> AsyncThrowingStream<[CircleMember], Error> {
+        AsyncThrowingStream { continuation in
+            let listener = circlesCollection
+                .document(circleId)
+                .collection("members")
+                .order(by: "addedAt", descending: true)
+                .addSnapshotListener { snapshot, error in
+                    if let error {
+                        continuation.finish(throwing: error)
+                        return
+                    }
+
+                    let members = snapshot?.documents.map { document in
+                        self.mapCircleMember(documentID: document.documentID, data: document.data())
+                    } ?? []
+
+                    continuation.yield(members)
+                }
+
+            continuation.onTermination = { _ in
+                listener.remove()
+            }
+        }
+    }
+
+    public func removeMember(circleId: String, memberId: String) async throws {
+        try await circlesCollection
+            .document(circleId)
+            .collection("members")
+            .document(memberId)
+            .delete()
+    }
+
+    public func ensureHasAtLeastOneCircle() async throws {
+        let circlesSnapshot = try await circlesCollection.limit(to: 1).getDocuments()
+        if !circlesSnapshot.documents.isEmpty {
+            return
+        }
+
+        let circleId = try await createCircle(name: "Circle 1", index: 0)
+        let legacySnapshot = try await legacyMystosCollection.getDocuments()
+        if legacySnapshot.documents.isEmpty {
+            return
+        }
+
+        let batch = db.batch()
+        for document in legacySnapshot.documents {
+            let data = document.data()
+            let rawName = strictStringOrEmpty(data["displayName"])
+            let cleanedName = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            guard !cleanedName.isEmpty else {
+                continue
+            }
+
+            let memberId = "m_\(document.documentID)"
+            let memberRef = circlesCollection.document(circleId).collection("members").document(memberId)
+
+            batch.setData(
+                [
+                    "memberId": memberId,
+                    "uid": NSNull(),
+                    "displayName": cleanedName,
+                    "username": "",
+                    "phoneE164": "",
+                    "onKetchUp": false,
+                    "addedAt": FieldValue.serverTimestamp(),
+                    "updatedAt": FieldValue.serverTimestamp(),
+                ],
+                forDocument: memberRef,
+                merge: true
+            )
+        }
+
+        try await batch.commit()
+    }
+
+    private var userDoc: DocumentReference {
+        db.collection("users").document(uid)
+    }
+
+    private var publicProfilesCollection: CollectionReference {
+        db.collection("publicProfiles")
+    }
+
+    private var publicProfileDoc: DocumentReference {
+        publicProfilesCollection.document(uid)
+    }
+
+    private var circlesCollection: CollectionReference {
+        userDoc.collection("circles")
+    }
+
+    private var legacyMystosCollection: CollectionReference {
+        userDoc.collection("mystos")
+    }
+
+    private var usernamesCollection: CollectionReference {
+        db.collection("usernames")
+    }
+
+    private var phonesCollection: CollectionReference {
+        db.collection("phones")
+    }
+
+    private func createCircle(name: String, index: Int) async throws -> String {
+        let document = circlesCollection.document()
+        try await document.setData(
+            [
+                "name": name,
+                "index": index,
+                "createdAt": FieldValue.serverTimestamp(),
+                "updatedAt": FieldValue.serverTimestamp(),
+            ]
+        )
+        return document.documentID
+    }
+
+    private func mapCircleMember(documentID: String, data: [String: Any]) -> CircleMember {
+        CircleMember(
+            id: documentID,
+            displayName: stringDescriptionOrEmpty(data["displayName"]),
+            onKetchUp: boolOrDefault(data["onKetchUp"], default: false),
+            uid: nilIfEmptyStringDescription(data["uid"]),
+            username: nilIfEmptyStringDescription(data["username"]),
+            phoneE164: nilIfEmptyStringDescription(data["phoneE164"])
+        )
+    }
+
+    private func mapPublicProfile(documentID: String, data: [String: Any]) -> PublicProfile {
+        let rawPhotoUrl = strictStringOrEmpty(data["photoUrl"])
+        let normalizedPhotoUrl = rawPhotoUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return PublicProfile(
+            uid: documentID,
+            displayName: strictStringOrEmpty(data["displayName"]),
+            username: strictStringOrEmpty(data["username"]),
+            phoneE164: strictStringOrEmpty(data["phoneE164"]),
+            photoUrl: normalizedPhotoUrl.isEmpty ? nil : rawPhotoUrl
+        )
+    }
+
+    private func mapUserCircle(documentID: String, data: [String: Any]) -> UserCircle {
+        UserCircle(
+            id: documentID,
+            name: strictStringOrDefault(data["name"], default: "Circle"),
+            index: intOrDefault(data["index"], default: 0)
+        )
+    }
+
+    private func mapCircleSeedMemberPayload(
+        seed: CircleSeedMember,
+        memberId: String,
+        cleanedUid: String,
+        cleanedName: String,
+        cleanedUsername: String,
+        cleanedPhone: String,
+        isRealUser: Bool
+    ) -> [String: Any] {
+        _ = seed
+
+        return [
+            "memberId": memberId,
+            "uid": isRealUser ? cleanedUid : NSNull(),
+            "displayName": cleanedName,
+            "username": cleanedUsername,
+            "phoneE164": cleanedPhone,
+            "onKetchUp": isRealUser,
+            "addedAt": FieldValue.serverTimestamp(),
+            "updatedAt": FieldValue.serverTimestamp(),
+        ]
+    }
+
+    private static func cleanToken(_ input: String) -> String {
+        let lowered = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let scalars = lowered.unicodeScalars.map { scalar -> Character in
+            if CharacterSet.alphanumerics.contains(scalar) || CharacterSet.whitespaces.contains(scalar) {
+                return Character(scalar)
+            }
+            return " "
+        }
+
+        let cleaned = String(scalars)
+        return cleaned
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
+
+    private func generatedMemberId(for displayName: String) -> String {
+        let timestampMs = Int(Date().timeIntervalSince1970 * 1000)
+            // Dart String.hashCode is not available in Swift, so this preserves the
+            // timestamp-plus-string-hash shape using Swift's closest built-in equivalent.
+            return "m_\(timestampMs)_\(displayName.hashValue)"
+    }
+
+    private func stringDescriptionOrEmpty(_ raw: Any?) -> String {
+        guard let raw else {
+            return ""
+        }
+        return String(describing: raw)
+    }
+
+    private func nilIfEmptyStringDescription(_ raw: Any?) -> String? {
+        let value = stringDescriptionOrEmpty(raw)
+        return value.isEmpty ? nil : value
+    }
+
+    private func strictStringOrEmpty(_ raw: Any?) -> String {
+        raw as? String ?? ""
+    }
+
+    private func strictStringOrDefault(_ raw: Any?, default defaultValue: String) -> String {
+        raw as? String ?? defaultValue
+    }
+
+    private func boolOrDefault(_ raw: Any?, default defaultValue: Bool) -> Bool {
+        raw as? Bool ?? defaultValue
+    }
+
+    private func intOrDefault(_ raw: Any?, default defaultValue: Int) -> Int {
+        if let value = raw as? Int {
+            return value
+        }
+
+        if let value = raw as? NSNumber {
+            return value.intValue
+        }
+
+        return defaultValue
+    }
 }
 
-class _SectionTitle extends StatelessWidget {
-  const _SectionTitle(this.text);
-  final String text;
+private extension Array {
+    func chunked(into size: Int) -> [[Element]] {
+        guard size > 0, !isEmpty else {
+            return isEmpty ? [] : [self]
+        }
 
-  @override
-  Widget build(BuildContext context) {
-    return Text(
-      text,
-      style: const TextStyle(
-        fontWeight: FontWeight.w900,
-        color: Colors.black87,
-      ),
-    );
-  }
-}
+        var index = 0
+        var chunks: [[Element]] = []
+        chunks.reserveCapacity((count + size - 1) / size)
 
-class _SelectableUserTile extends StatelessWidget {
-  const _SelectableUserTile({
-    required this.u,
-    required this.selected,
-    required this.onTap,
-  });
+        while index < count {
+            let endIndex = Swift.min(index + size, count)
+            chunks.append(Array(self[index..<endIndex]))
+            index = endIndex
+        }
 
-  final _AppUserContact u;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        onTap: onTap,
-        tileColor: Colors.white.withOpacity(0.65),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-        leading: CircleAvatar(
-          backgroundColor: Colors.black.withOpacity(0.08),
-          child: Text(
-            u.displayName.isNotEmpty ? u.displayName[0].toUpperCase() : '?',
-            style: const TextStyle(
-              fontWeight: FontWeight.w900,
-              color: Colors.black,
-            ),
-          ),
-        ),
-        title: Text(
-          u.displayName,
-          style: const TextStyle(fontWeight: FontWeight.w900),
-        ),
-        subtitle: Text('@${u.username}'),
-        trailing: Icon(
-          selected ? Icons.check_circle : Icons.circle_outlined,
-          color: Colors.black,
-        ),
-      ),
-    );
-  }
-}
-
-class _SelectableLocalTile extends StatelessWidget {
-  const _SelectableLocalTile({
-    required this.c,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final _LocalContact c;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: ListTile(
-        onTap: onTap,
-        tileColor: Colors.white.withOpacity(0.65),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-        leading: CircleAvatar(
-          backgroundColor: Colors.black.withOpacity(0.08),
-          child: Text(
-            c.name.isNotEmpty ? c.name[0].toUpperCase() : '?',
-            style: const TextStyle(
-              fontWeight: FontWeight.w900,
-              color: Colors.black,
-            ),
-          ),
-        ),
-        title: Text(
-          c.name,
-          style: const TextStyle(fontWeight: FontWeight.w900),
-        ),
-        subtitle: Text(c.phones.isNotEmpty ? c.phones.first : ''),
-        trailing: Icon(
-          selected ? Icons.check_circle : Icons.circle_outlined,
-          color: Colors.black,
-        ),
-      ),
-    );
-  }
-}
-
-class _LocalContact {
-  const _LocalContact({
-    required this.name,
-    required this.phones,
-  });
-
-  final String name;
-  final List<String> phones;
-}
-
-class _AppUserContact {
-  const _AppUserContact({
-    required this.uid,
-    required this.displayName,
-    required this.username,
-  });
-
-  final String uid;
-  final String displayName;
-  final String username;
+        return chunks
+    }
 }
