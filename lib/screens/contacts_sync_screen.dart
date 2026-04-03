@@ -33,14 +33,20 @@ class _ContactsSyncScreenState extends State<ContactsSyncScreen> {
   @override
   void initState() {
     super.initState();
+
     if (kDevBypassContacts) {
       _loading = false;
       return;
     }
-    _boot();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _boot();
+    });
   }
 
   Future<void> _boot() async {
+    if (!mounted) return;
+
     try {
       setState(() {
         _loading = true;
@@ -51,8 +57,20 @@ class _ContactsSyncScreenState extends State<ContactsSyncScreen> {
         await AuthService.ensureSignedIn();
       }
 
-      final permitted = await FlutterContacts.requestPermission();
+      bool permitted = false;
+      try {
+        permitted = await FlutterContacts.requestPermission();
+      } catch (e) {
+        if (!mounted) return;
+        setState(() {
+          _loading = false;
+          _error = 'Failed to request contacts permission. ($e)';
+        });
+        return;
+      }
+
       if (!permitted) {
+        if (!mounted) return;
         setState(() {
           _loading = false;
           _error = 'Contacts permission denied.';
@@ -60,7 +78,18 @@ class _ContactsSyncScreenState extends State<ContactsSyncScreen> {
         return;
       }
 
-      final contacts = await FlutterContacts.getContacts(withProperties: true);
+      List<Contact> contacts;
+      try {
+        contacts = await FlutterContacts.getContacts(withProperties: true);
+      } catch (e) {
+        if (!mounted) return;
+        setState(() {
+          _loading = false;
+          _error = 'Failed to load contacts. ($e)';
+        });
+        return;
+      }
+
       final locals = <_LocalContact>[];
 
       for (final c in contacts) {
@@ -138,6 +167,7 @@ class _ContactsSyncScreenState extends State<ContactsSyncScreen> {
         _loading = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _loading = false;
         _error = 'Failed to sync contacts. ($e)';
