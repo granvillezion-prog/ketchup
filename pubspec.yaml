@@ -13,7 +13,6 @@ dependencies:
 
   cupertino_icons: ^1.0.8
   shared_preferences: ^2.5.4
-  flutter_contacts: ^1.1.9
   url_launcher: ^6.3.0
   flutter_animate: ^4.5.0
 
