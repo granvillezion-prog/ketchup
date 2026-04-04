@@ -1,6 +1,5 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_contacts/flutter_contacts.dart';
 
 import '../app_router.dart';
 import '../auth/auth_service.dart';
@@ -52,22 +51,27 @@ _boot();
 Future<void> _boot() async {
 if (!mounted) return;
 
-debugPrint('🔥 CONTACT SCREEN _boot START');
+debugPrint('🔥 CONTACT SCREEN _boot START (NO CONTACTS MODE)');
 
 try {
 setState(() {
-_loading = true;
+_loading = false;
 _error = null;
+_all = [];
+_onApp = [];
+_notOnApp = [];
 });
 
-if (FirebaseAuth.instance.currentUser == null) {
-debugPrint('🔥 NO FIREBASE USER — ENSURING SIGN IN');
-await AuthService.ensureSignedIn();
-debugPrint('🔥 SIGN IN COMPLETE');
-} else {
-debugPrint(
-'🔥 FIREBASE USER EXISTS: ${FirebaseAuth.instance.currentUser?.uid}',
-);
+debugPrint('🔥 CONTACT SCREEN _boot SUCCESS (NO CONTACTS MODE)');
+} catch (e) {
+debugPrint('🔥 CONTACT SCREEN _boot OUTER CRASH: $e');
+
+if (!mounted) return;
+setState(() {
+_loading = false;
+_error = 'Failed to load contacts screen. ($e)';
+});
+}
 }
 
 bool permitted = false;
