@@ -27,8 +27,6 @@ final Set<String> _selectedUids = {};
 final Set<String> _selectedLocalKeys = {};
 
 static const int minPick = AppStorage.minCircleMembersToUnlock;
-
-// Keep this true until the iOS contacts crash is fully isolated and fixed.
 static const bool kDevBypassContacts = true;
 
 @override
@@ -36,12 +34,6 @@ void initState() {
 super.initState();
 
 debugPrint('🔥 CONTACT SCREEN INIT HIT');
-
-if (kDevBypassContacts) {
-debugPrint('🔥 DEV BYPASS ACTIVE — SKIPPING CONTACTS BOOT');
-_loading = false;
-return;
-}
 
 WidgetsBinding.instance.addPostFrameCallback((_) {
 _boot();
@@ -54,6 +46,18 @@ if (!mounted) return;
 debugPrint('🔥 CONTACT SCREEN _boot START (NO CONTACTS MODE)');
 
 try {
+if (FirebaseAuth.instance.currentUser == null) {
+debugPrint('🔥 NO FIREBASE USER — ENSURING SIGN IN');
+await AuthService.ensureSignedIn();
+debugPrint('🔥 SIGN IN COMPLETE');
+} else {
+debugPrint(
+'🔥 FIREBASE USER EXISTS: ${FirebaseAuth.instance.currentUser?.uid}',
+);
+}
+
+if (!mounted) return;
+
 setState(() {
 _loading = false;
 _error = null;
@@ -64,163 +68,15 @@ _notOnApp = [];
 
 debugPrint('🔥 CONTACT SCREEN _boot SUCCESS (NO CONTACTS MODE)');
 } catch (e) {
-debugPrint('🔥 CONTACT SCREEN _boot OUTER CRASH: $e');
+debugPrint('🔥 CONTACT SCREEN _boot CRASH: $e');
 
 if (!mounted) return;
+
 setState(() {
 _loading = false;
 _error = 'Failed to load contacts screen. ($e)';
 });
 }
-}
-
-bool permitted = false;
-
-try {
-debugPrint('🔥 REQUESTING CONTACT PERMISSION...');
-permitted = await FlutterContacts.requestPermission();
-debugPrint('🔥 CONTACT PERMISSION RESULT: $permitted');
-} catch (e) {
-debugPrint('🔥 PERMISSION CRASH: $e');
-
-if (!mounted) return;
-setState(() {
-_loading = false;
-_error = 'Permission request crashed: $e';
-});
-return;
-}
-
-if (!permitted) {
-debugPrint('🔥 PERMISSION DENIED — STOPPING FLOW');
-
-if (!mounted) return;
-setState(() {
-_loading = false;
-_error = 'Contacts permission denied.';
-});
-return;
-}
-
-List<Contact> contacts = [];
-
-try {
-debugPrint('🔥 FETCHING CONTACTS...');
-contacts = await FlutterContacts.getContacts(withProperties: true);
-debugPrint('🔥 CONTACTS LOADED: ${contacts.length}');
-} catch (e) {
-debugPrint('🔥 CONTACT FETCH CRASH: $e');
-
-if (!mounted) return;
-setState(() {
-_loading = false;
-_error = 'Failed to load contacts: $e';
-});
-return;
-}
-
-final locals = <_LocalContact>[];
-
-for (final c in contacts) {
-final name = [c.name.first, c.name.last]
-.where((x) => x.trim().isNotEmpty)
-.join(' ')
-.trim();
-
-final phones = c.phones.map((p) => p.number).toList();
-if (name.isEmpty || phones.isEmpty) continue;
-
-locals.add(_LocalContact(name: name, phones: phones));
-}
-
-debugPrint('🔥 LOCAL CONTACTS AFTER FILTER: ${locals.length}');
-
-final phoneSet = <String>{};
-for (final lc in locals) {
-for (final raw in lc.phones) {
-final e164 = _toE164Guess(raw);
-if (e164.isNotEmpty) phoneSet.add(e164);
-}
-}
-
-debugPrint('🔥 NORMALIZED PHONE COUNT: ${phoneSet.length}');
-
-final fs = FirestoreService(AuthService.uid);
-final phoneToUid = await fs.lookupExistingUsersByPhones(phoneSet.toList());
-final uids = phoneToUid.values.toSet().toList();
-final profiles = await fs.getPublicProfilesByUids(uids);
-final uidToProfile = {for (final p in profiles) p.uid: p};
-
-final onApp = <_AppUserContact>[];
-final usedUid = <String>{};
-
-for (final entry in phoneToUid.entries) {
-final uid = entry.value;
-if (usedUid.contains(uid)) continue;
-
-final prof = uidToProfile[uid];
-if (prof == null) continue;
-
-usedUid.add(uid);
-onApp.add(
-_AppUserContact(
-uid: uid,
-displayName:
-prof.displayName.isEmpty ? 'Unknown' : prof.displayName,
-username: prof.username,
-),
-);
-}
-
-onApp.sort(
-(a, b) =>
-a.displayName.toLowerCase().compareTo(b.displayName.toLowerCase()),
-);
-
-final notOn = <_LocalContact>[];
-for (final lc in locals) {
-var anyMatch = false;
-for (final raw in lc.phones) {
-final e164 = _toE164Guess(raw);
-if (e164.isNotEmpty && phoneToUid.containsKey(e164)) {
-anyMatch = true;
-break;
-}
-}
-if (!anyMatch) notOn.add(lc);
-}
-
-notOn.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
-
-debugPrint('🔥 ON APP COUNT: ${onApp.length}');
-debugPrint('🔥 NOT ON APP COUNT: ${notOn.length}');
-
-if (!mounted) return;
-setState(() {
-_all = locals;
-_onApp = onApp;
-_notOnApp = notOn;
-_loading = false;
-});
-
-debugPrint('🔥 CONTACT SCREEN _boot SUCCESS');
-} catch (e) {
-debugPrint('🔥 CONTACT SCREEN _boot OUTER CRASH: $e');
-
-if (!mounted) return;
-setState(() {
-_loading = false;
-_error = 'Failed to sync contacts. ($e)';
-});
-}
-}
-
-String _toE164Guess(String raw) {
-final d = raw.replaceAll(RegExp(r'[^0-9]'), '');
-if (d.length == 10) return '+1$d';
-if (d.length == 11 && d.startsWith('1')) return '+$d';
-if (raw.trim().startsWith('+') && d.length >= 8) return '+$d';
-return '';
 }
 
 int get _selectedCount => _selectedUids.length + _selectedLocalKeys.length;
@@ -237,17 +93,8 @@ _error = null;
 });
 }
 
-String _bestPhoneKey(_LocalContact c) {
-for (final raw in c.phones) {
-final e164 = _toE164Guess(raw);
-if (e164.isNotEmpty) return e164;
-}
-return '';
-}
-
 void _toggleLocal(_LocalContact c) {
-final best = _bestPhoneKey(c);
-final key = '${c.name}|$best';
+final key = '${c.name}|${c.phone}';
 
 setState(() {
 if (_selectedLocalKeys.contains(key)) {
@@ -319,10 +166,15 @@ AppRouter.circle,
 (_) => false,
 );
 } catch (e) {
-setState(() => _error = 'Dev skip failed. ($e)');
+if (!mounted) return;
+setState(() {
+_error = 'Dev skip failed. ($e)';
+});
 } finally {
 if (!mounted) return;
-setState(() => _saving = false);
+setState(() {
+_saving = false;
+});
 }
 }
 
@@ -330,7 +182,9 @@ Future<void> _continue() async {
 if (_saving) return;
 
 if (!kDevBypassContacts && !_meetsMin) {
-setState(() => _error = 'Pick at least $minPick people.');
+setState(() {
+_error = 'Pick at least $minPick people.';
+});
 return;
 }
 
@@ -360,11 +214,10 @@ username: u.username,
 }
 
 for (final c in _notOnApp) {
-final best = _bestPhoneKey(c);
-final key = '${c.name}|$best';
+final key = '${c.name}|${c.phone}';
 if (!_selectedLocalKeys.contains(key)) continue;
 
-final e164 = FirestoreService.normalizePhone(best);
+final e164 = FirestoreService.normalizePhone(c.phone);
 final stable = e164.isNotEmpty
 ? 'phone_${e164.replaceAll('+', '')}'
 : 'local_${c.name.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), '_')}_${c.name.hashCode.abs()}';
@@ -425,10 +278,15 @@ AppRouter.circle,
 (_) => false,
 );
 } catch (e) {
-setState(() => _error = 'Failed to save. ($e)');
+if (!mounted) return;
+setState(() {
+_error = 'Failed to save. ($e)';
+});
 } finally {
 if (!mounted) return;
-setState(() => _saving = false);
+setState(() {
+_saving = false;
+});
 }
 }
 
@@ -442,7 +300,10 @@ backgroundColor: Colors.transparent,
 appBar: AppBar(
 title: const Text(
 'CONTACTS',
-style: TextStyle(fontWeight: FontWeight.w900, letterSpacing: 0.6),
+style: TextStyle(
+fontWeight: FontWeight.w900,
+letterSpacing: 0.6,
+),
 ),
 actions: [
 if (kDevBypassContacts)
@@ -563,7 +424,7 @@ const SizedBox(height: 14),
 const _SectionTitle('From your contacts'),
 const SizedBox(height: 8),
 ..._notOnApp.map((c) {
-final key = '${c.name}|${_bestPhoneKey(c)}';
+final key = '${c.name}|${c.phone}';
 final sel = _selectedLocalKeys.contains(key);
 return _SelectableLocalTile(
 c: c,
@@ -718,7 +579,7 @@ title: Text(
 c.name,
 style: const TextStyle(fontWeight: FontWeight.w900),
 ),
-subtitle: Text(c.phones.isNotEmpty ? c.phones.first : ''),
+subtitle: Text(c.phone),
 trailing: Icon(
 selected ? Icons.check_circle : Icons.circle_outlined,
 color: Colors.black,
@@ -731,11 +592,11 @@ color: Colors.black,
 class _LocalContact {
 const _LocalContact({
 required this.name,
-required this.phones,
+required this.phone,
 });
 
 final String name;
-final List<String> phones;
+final String phone;
 }
 
 class _AppUserContact {
