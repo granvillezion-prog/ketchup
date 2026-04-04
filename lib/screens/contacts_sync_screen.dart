@@ -1,5 +1,6 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_contacts/flutter_contacts.dart';
 
 import '../app_router.dart';
 import '../auth/auth_service.dart';
@@ -610,6 +611,7 @@ letterSpacing: 0.8,
 
 class _SectionTitle extends StatelessWidget {
 const _SectionTitle(this.text);
+
 final String text;
 
 @override
@@ -642,8 +644,13 @@ padding: const EdgeInsets.only(bottom: 8),
 child: ListTile(
 onTap: onTap,
 tileColor: Colors.white.withOpacity(0.65),
-shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+shape: RoundedRectangleBorder(
+borderRadius: BorderRadius.circular(16),
+),
+contentPadding: const EdgeInsets.symmetric(
+horizontal: 14,
+vertical: 4,
+),
 leading: CircleAvatar(
 backgroundColor: Colors.black.withOpacity(0.08),
 child: Text(
@@ -686,8 +693,13 @@ padding: const EdgeInsets.only(bottom: 8),
 child: ListTile(
 onTap: onTap,
 tileColor: Colors.white.withOpacity(0.65),
-shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+shape: RoundedRectangleBorder(
+borderRadius: BorderRadius.circular(16),
+),
+contentPadding: const EdgeInsets.symmetric(
+horizontal: 14,
+vertical: 4,
+),
 leading: CircleAvatar(
 backgroundColor: Colors.black.withOpacity(0.08),
 child: Text(
